@@ -1,4 +1,9 @@
-"""Always-on audio stays on the device. One remote turn may open TLS."""
+"""Always-on audio stays on the device. One remote turn may open TLS.
+
+The device client is ``audio_model/tls.py``. The GPU gateway listener is
+``gateway/tls.py``. Both are named ``tls.py`` and may import the standard
+library TLS stack. Nothing else in this package may.
+"""
 
 import ast
 from pathlib import Path
@@ -16,8 +21,8 @@ FORBIDDEN_ROOTS = {
     "httpx",
 }
 
-# The remote Audio Model is the only code allowed to open a socket, and only
-# for one post-wake turn. It may use the standard library TLS stack.
+# The remote Audio Model session is the only code allowed to open a socket,
+# and only for one post-wake turn. It may use the standard library TLS stack.
 TLS_FILE = "tls.py"
 TLS_MODULES = {"socket", "ssl"}
 
@@ -39,7 +44,7 @@ def test_only_the_remote_transport_imports_a_network_stack() -> None:
                     continue
                 if path.name == TLS_FILE and root_name in TLS_MODULES:
                     continue
-                offenders.append(f"{path.name}: {module}")
+                offenders.append(f"{path.relative_to(root)}: {module}")
     assert offenders == []
 
 
