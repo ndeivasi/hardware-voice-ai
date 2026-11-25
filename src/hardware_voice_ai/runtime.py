@@ -17,7 +17,10 @@ from hardware_voice_ai.config import DeviceConfig
 from hardware_voice_ai.errors import ConfigurationError
 from hardware_voice_ai.log.detections import DetectionLog
 from hardware_voice_ai.mute.control import InMemoryMuteControl, MuteControl
+from hardware_voice_ai.playback.player import SpeakerPlayback
+from hardware_voice_ai.playback.speaker import NullSpeaker
 from hardware_voice_ai.session.orchestrator import SessionOrchestrator
+from hardware_voice_ai.session.state import DeviceState
 from hardware_voice_ai.wake.engine import WakeEngine
 from hardware_voice_ai.wake.factory import build_wake_model
 from hardware_voice_ai.wake.model import WakeModel
@@ -42,6 +45,7 @@ class WakeRuntime:
         capture: CapturePort | None = None,
         mute: MuteControl | None = None,
         detection_log: DetectionLog | None = None,
+        playback: SpeakerPlayback | None = None,
     ) -> None:
         if (
             source.format.sample_rate_hz != config.sample_rate_hz
@@ -69,7 +73,17 @@ class WakeRuntime:
             sample_rate_hz=config.sample_rate_hz,
         )
         self.engine = WakeEngine(model if model is not None else build_wake_model(config), config)
-        self.orchestrator = SessionOrchestrator(self.capture, audio_model=config.audio_model)
+        if playback is None:
+            playback = SpeakerPlayback(
+                NullSpeaker(config.audio_format, queue_ms=config.playback_queue_ms),
+                volume=config.volume,
+            )
+        self.playback = playback
+        self.orchestrator = SessionOrchestrator(
+            self.capture,
+            audio_model=config.audio_model,
+            playback=playback,
+        )
         if isinstance(self.capture, UtteranceCapture):
             self.capture.bind_session(self.orchestrator)
         self._lock = threading.RLock()
@@ -91,7 +105,10 @@ class WakeRuntime:
             pass
 
     def close(self) -> None:
-        self.source.close()
+        try:
+            self.playback.close()
+        finally:
+            self.source.close()
 
     def _handle(self, frame) -> None:
         with self._lock:
@@ -115,9 +132,10 @@ class WakeRuntime:
                     event, self.buffer.snapshot()
                 )
             except Exception:
-                # CapturePort.start failed. The orchestrator is back in idle.
-                # Keep reading the microphone and record the wake as not accepted.
-                accepted = False
+                # CapturePort.start rolls the session back to idle. A cue
+                # error can still leave the turn in capturing; that wake
+                # was accepted. Keep reading the microphone either way.
+                accepted = self.orchestrator.state is DeviceState.CAPTURING
             self.log.record(
                 event,
                 accepted=accepted,

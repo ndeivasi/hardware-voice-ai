@@ -57,7 +57,7 @@ def test_architecture_transitions() -> None:
         {DeviceState.CAPTURING, DeviceState.IDLE}
     )
     assert ALLOWED_TRANSITIONS[DeviceState.CAPTURING] == frozenset(
-        {DeviceState.TRANSCRIBING, DeviceState.IDLE}
+        {DeviceState.TRANSCRIBING, DeviceState.SPEAKING, DeviceState.IDLE}
     )
     assert ALLOWED_TRANSITIONS[DeviceState.TRANSCRIBING] == frozenset(
         {DeviceState.THINKING, DeviceState.IDLE}

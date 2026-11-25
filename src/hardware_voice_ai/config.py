@@ -1,8 +1,9 @@
 """Device configuration for on-device wake detection.
 
 The only model choice stored here is Audio Model (``local`` or ``remote``,
-default ``remote``). Wake-word identity and the microphone backend are
-swappable. Speech-to-text and text-to-speech are not settings.
+default ``remote``). Wake-word identity, the microphone backend, and the
+speaker backend are swappable. Volume is a playback control, not another
+model setting. Speech-to-text and text-to-speech are not settings.
 """
 
 import os
@@ -12,6 +13,7 @@ from pathlib import Path
 
 from hardware_voice_ai.audio.frame import AudioFormat
 from hardware_voice_ai.errors import ConfigurationError
+from hardware_voice_ai.playback.constants import DEFAULT_QUEUE_MS, STOP_LATENCY_BUDGET_MS
 from hardware_voice_ai.session.audio_model import AudioModel, parse_audio_model
 from hardware_voice_ai.wake.defaults import DEFAULT_WAKE_WORD, REFERENCE_MODEL_ID
 
@@ -38,6 +40,9 @@ class DeviceConfig:
     detection_log_path: Path | None = None
     audio_backend: str = "sounddevice"
     input_device: str | None = None
+    output_device: str | None = None
+    volume: float = 1.0
+    playback_queue_ms: int = DEFAULT_QUEUE_MS
 
     def __post_init__(self) -> None:
         if isinstance(self.audio_model, str):
@@ -90,6 +95,20 @@ class DeviceConfig:
             raise ConfigurationError(
                 "audio_backend must be 'sounddevice' or 'pcm'."
             )
+        if isinstance(self.volume, bool) or not isinstance(self.volume, (int, float)):
+            raise ConfigurationError("volume must be in [0, 1].")
+        if not 0.0 <= float(self.volume) <= 1.0:
+            raise ConfigurationError("volume must be in [0, 1].")
+        object.__setattr__(self, "volume", float(self.volume))
+        if (
+            isinstance(self.playback_queue_ms, bool)
+            or not isinstance(self.playback_queue_ms, int)
+            or not 1 <= self.playback_queue_ms <= STOP_LATENCY_BUDGET_MS
+        ):
+            raise ConfigurationError(
+                "playback_queue_ms must be from 1 to "
+                f"{STOP_LATENCY_BUDGET_MS} so a stop stays inside the latency budget."
+            )
         if self.detection_log_path is not None and "://" in str(self.detection_log_path):
             raise ConfigurationError("Detection logs must be a local file path.")
 
@@ -117,6 +136,7 @@ class DeviceConfig:
         if "://" in log_path:
             raise ConfigurationError("Detection logs must be a local file path.")
         device = values.get("HVA_INPUT_DEVICE", "").strip()
+        output = values.get("HVA_OUTPUT_DEVICE", "").strip()
         return cls(
             audio_model=parse_audio_model(values.get("HVA_AUDIO_MODEL", "remote")),
             wake_word=values.get("HVA_WAKE_WORD", DEFAULT_WAKE_WORD),
@@ -134,6 +154,11 @@ class DeviceConfig:
             detection_log_path=Path(log_path) if log_path else None,
             audio_backend=values.get("HVA_AUDIO_BACKEND", "sounddevice"),
             input_device=device or None,
+            output_device=output or None,
+            volume=_optional_float(values, "HVA_VOLUME", 1.0),
+            playback_queue_ms=_optional_int(
+                values, "HVA_PLAYBACK_QUEUE_MS", DEFAULT_QUEUE_MS
+            ),
         )
 
 

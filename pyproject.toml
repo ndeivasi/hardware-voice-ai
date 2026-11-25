@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "hardware-voice-ai"
 version = "0.1.0"
-description = "On-device wake-word detection for the hardware voice assistant"
+description = "On-device wake word, microphone capture, and speaker playback"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = ["numpy>=1.26"]
