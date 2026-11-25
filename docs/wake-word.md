@@ -2,7 +2,7 @@
 
 This package is the on-device wake path from the [architecture baseline](architecture.md). Always-on audio stays on the device. An accepted wake notifies the session orchestrator. There is no speech-to-text stage and no text-to-speech stage.
 
-The architecture chain is `idle → woken → capturing → speaking → idle`. `transcribing` and `thinking` remain in `DeviceState` until a follow-up removes them. Wake detection takes `idle → woken → capturing`. After capture finishes an utterance, the Audio Model runs off the microphone thread and playback of the spoken reply is local. Cancel and hardware mute return to `idle`. A wake during capture is ignored. A wake during speaking stops playback and starts a new turn. A local cue is not captured and is not scored as a wake. See [playback.md](playback.md) and [audio-model.md](audio-model.md).
+The architecture chain is `idle → woken → capturing → speaking → idle`. Wake detection takes `idle → woken → capturing`. After capture finishes an utterance, the Audio Model runs off the microphone thread and playback of the spoken reply is local. Cancel and hardware mute return to `idle`. A wake during capture is ignored. A wake during speaking stops playback and starts a new turn. A local cue is not captured and is not scored as a wake. See [playback.md](playback.md) and [audio-model.md](audio-model.md).
 
 ## Assumptions
 

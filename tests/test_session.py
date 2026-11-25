@@ -51,18 +51,18 @@ def _snapshot() -> AudioSnapshot:
 
 
 def test_architecture_transitions() -> None:
+    assert {state.value for state in DeviceState} == {
+        "idle",
+        "woken",
+        "capturing",
+        "speaking",
+    }
     assert set(ALLOWED_TRANSITIONS) == set(DeviceState)
     assert ALLOWED_TRANSITIONS[DeviceState.IDLE] == frozenset({DeviceState.WOKEN})
     assert ALLOWED_TRANSITIONS[DeviceState.WOKEN] == frozenset(
         {DeviceState.CAPTURING, DeviceState.IDLE}
     )
     assert ALLOWED_TRANSITIONS[DeviceState.CAPTURING] == frozenset(
-        {DeviceState.TRANSCRIBING, DeviceState.SPEAKING, DeviceState.IDLE}
-    )
-    assert ALLOWED_TRANSITIONS[DeviceState.TRANSCRIBING] == frozenset(
-        {DeviceState.THINKING, DeviceState.IDLE}
-    )
-    assert ALLOWED_TRANSITIONS[DeviceState.THINKING] == frozenset(
         {DeviceState.SPEAKING, DeviceState.IDLE}
     )
     assert ALLOWED_TRANSITIONS[DeviceState.SPEAKING] == frozenset({DeviceState.IDLE})
