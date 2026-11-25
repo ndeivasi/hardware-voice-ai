@@ -2,7 +2,7 @@
 
 This package is the on-device wake path from the [architecture baseline](architecture.md). Always-on audio stays on the device. An accepted wake notifies the session orchestrator. There is no speech-to-text stage and no text-to-speech stage.
 
-The session states are `idle → woken → capturing → transcribing → thinking → speaking → idle`. This work takes `idle → woken → capturing`. Cancel and hardware mute return to `idle` from any later state this package can enter. A wake during capture is ignored. A wake during speaker playback stops that playback and starts a new turn; see [playback.md](playback.md).
+The architecture chain is `idle → woken → capturing → speaking → idle`. `transcribing` and `thinking` remain in `DeviceState` until a follow-up removes them. Wake detection takes `idle → woken → capturing`. After capture finishes an utterance, the Audio Model runs off the microphone thread and playback of the spoken reply is local. Cancel and hardware mute return to `idle`. A wake during capture is ignored. A wake during speaking stops playback and starts a new turn. A local cue is not captured and is not scored as a wake. See [playback.md](playback.md) and [audio-model.md](audio-model.md).
 
 ## Assumptions
 
@@ -61,7 +61,7 @@ Design targets from the architecture, not measurements on a board:
 ### Privacy and logs
 
 - Always-on audio is written only to the in-memory pre-roll and to the wake model.
-- The package does not import a network client. Audio can leave the device only after a wake, and only from later work, and only when Audio Model is `remote`.
+- The wake loop does not import a network client and does not open a socket. Audio can leave the device only after a wake, only as the captured utterance, and only when Audio Model is `remote`. That send is the Audio Model voice loop in [audio-model.md](audio-model.md), and it is not started by this wake loop.
 - Detection logs are off unless `HVA_DETECTION_LOG` is a local file path. Each line is JSON metadata: word, model, confidence, latency, channel, audio-model setting, and whether the session accepted the wake. The log does not contain samples. A URL path is rejected.
 
 ## Handoff, and what issue 2 owns
@@ -78,16 +78,14 @@ The decision frame is the last frame in the snapshot. Later microphone frames ar
 
 `PendingCapturePort` records that handoff and drops later samples. Tests that need the tap to stay open pass it in explicitly. `WakeRuntime` does not use it by default. The default capture is `UtteranceCapture`, and the runtime binds that object to the real `SessionOrchestrator` before audio starts. Callers do not call `bind_session`.
 
-`UtteranceCapture` keeps the pre-roll plus the frames after the decision. Silence ends the utterance through `SessionOrchestrator.close_capture`. That stops the tap with `end_of_utterance` and leaves the session in `capturing`. The utterance, including the pre-roll, is queued on `runtime.utterances` for the Audio Model. See `docs/capture.md`.
-
-`close_capture` does not run a model and does not enter `transcribing`.
+`UtteranceCapture` keeps the pre-roll plus the frames after the decision. Silence ends the utterance through `SessionOrchestrator.close_capture`. That stops the tap with `end_of_utterance`, queues the utterance, and leaves the session in `capturing`. `close_capture` does not run the Audio Model. After that call returns, the wake runtime runs the one model and moves `capturing → speaking → idle`. See [audio-model.md](audio-model.md) and [capture.md](capture.md).
 
 Cancel calls `stop(cancel)` and returns to `idle`. Hardware mute calls `stop(mute)`, clears the pre-roll, and returns to `idle`.
 
 Issue 2 should not upload always-on audio. Only the post-wake utterance, including the pre-roll that was handed over, is in scope for a later turn, and only when Audio Model is `remote`.
 
-## What this package does not do
+## What the wake loop does not do
 
-- The local or remote Audio Model and the cloud gateway (issues 3–5). Speaker playback is [playback.md](playback.md). Post-wake utterance capture is `UtteranceCapture`; see [capture.md](capture.md).
+- Choosing the production Audio Model behind `local` or `remote`. The loop itself is in [audio-model.md](audio-model.md). Speaker playback is [playback.md](playback.md). Post-wake utterance capture is `UtteranceCapture`; see [capture.md](capture.md).
 - A separate speech-to-text or text-to-speech setting or pipeline stage.
 - Choosing the production wake word, training a far-field speech model, or selecting the board.

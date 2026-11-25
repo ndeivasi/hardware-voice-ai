@@ -74,7 +74,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     print(
         f"wake model={config.wake_model_id} label={config.wake_word!r} "
-        f"audio_model={config.audio_model.value} channels={config.channels} "
+        f"audio_model={config.audio_model.value} "
+        f"gateway={'set' if config.gateway.url else 'unset'} "
+        f"channels={config.channels} "
         f"volume={config.volume:g} "
         f"detection_log={'off' if config.detection_log_path is None else config.detection_log_path}",
         flush=True,

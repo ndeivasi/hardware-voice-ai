@@ -1,9 +1,9 @@
-"""On-device wake word, microphone capture, and speaker playback.
+"""On-device wake word, capture, speaker playback, and one Audio Model.
 
 Always-on microphone audio stays in this process. A detection notifies the
-session orchestrator. Spoken replies and local cues play on the device
-speaker. This package does not run an Audio Model and it does not open a
-network connection.
+session orchestrator. After capture, the Audio Model (``local`` or
+``remote``) produces the spoken reply. Playback and local cues stay on the
+device speaker. Speech-to-text and text-to-speech are not separate stages.
 """
 
 __version__ = "0.1.0"
