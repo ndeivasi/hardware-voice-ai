@@ -106,6 +106,11 @@ class StubReplyAudio:
             self._finished = True
             self._cv.notify_all()
 
+    def read_would_block(self) -> bool:
+        """True when the next ``read`` would wait for a chunk that is not here."""
+        with self._cv:
+            return len(self._pending) == 0 and not self._finished
+
     def read(self, max_samples: int) -> np.ndarray | None:
         if max_samples < 1:
             raise ValueError("max_samples must be positive")

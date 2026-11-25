@@ -66,6 +66,12 @@ class SpeakerPlayback:
     Volume applies to the next block written, including a reply already
     in progress. The speaker's queue, not a stored file, is what a stop
     discards.
+
+    ``play_reply`` and ``play_cue`` wait until the playback thread has run.
+    A non-blocking speaker finishes a buffered sound before the call
+    returns. A live speaker returns with that audio queued, blocked on the
+    callback or on a later chunk. Either way the call does not depend on
+    the interpreter preempting the caller.
     """
 
     def __init__(self, speaker: Speaker, *, volume: float = 1.0) -> None:
@@ -73,6 +79,7 @@ class SpeakerPlayback:
         self._volume = _require_volume(volume)
         self._lock = threading.Lock()
         self._stop = threading.Event()
+        self._gate = threading.Event()
         self._suppressed = False
         self._thread: threading.Thread | None = None
         self._source: ReplyAudio | None = None
@@ -117,17 +124,23 @@ class SpeakerPlayback:
     ) -> PlaybackResult:
         """Start ``source`` now. Later chunks are played as they arrive.
 
-        Returns the current status. A short reply may already be
-        ``completed`` by the time this returns. ``on_finished`` is called
-        from the playback thread with the final ``PlaybackResult`` and
-        must not call back into ``play_reply`` on this same object.
+        Returns the current status. The playback thread has already run:
+        a buffered reply on a non-blocking speaker may already be
+        ``completed``, and a live reply is in the speaker queue. Later
+        chunks are played as they arrive. ``on_finished`` is called from
+        the playback thread with the final ``PlaybackResult`` and must
+        not call back into ``play_reply`` on this same object.
         """
         self._require_source(source)
         self.stop(PlaybackStopReason.REPLACED)
         return self._start(source, on_finished, cue=False)
 
     def play_cue(self, cue: Cue) -> PlaybackResult:
-        """Play one local cue. The samples are rendered here, not fetched."""
+        """Play one local cue. The samples are rendered here, not fetched.
+
+        Returns after the playback thread has queued the cue and is waiting
+        on the speaker, or after a non-blocking speaker has finished it.
+        """
         if not isinstance(cue, Cue):
             raise ConfigurationError("cue must be a local Cue.")
         rendered = render_cue(cue, self.speaker.format)
@@ -231,13 +244,24 @@ class SpeakerPlayback:
             self._status = PlaybackStatus.PLAYING
             self._reason = PlaybackStopReason.NONE
             self._result = self._counts(PlaybackStatus.PLAYING, PlaybackStopReason.NONE)
+            self._gate.clear()
             thread = threading.Thread(
                 target=self._run,
                 name="speaker-playback",
                 daemon=True,
             )
             self._thread = thread
+            # ``start`` returns once the thread is marked started, before
+            # ``_run``. Publishing ``_thread`` only after that keeps ``stop``
+            # and ``wait`` from joining a thread that has not started. ``_run``
+            # may block on this lock; it does not need it to become started.
             thread.start()
+        # Waiting releases the GIL, so the playback thread runs before this
+        # returns even when the caller is a tight loop inside one switch
+        # interval. Python 3.13 does not preempt that loop; 3.12 often does.
+        # ``_run`` opens the gate when it is blocked on the speaker or on
+        # the next chunk, or when the sound has finished.
+        self._gate.wait(timeout=2.0)
         return self.status()
 
     def _run(self) -> None:
@@ -248,6 +272,8 @@ class SpeakerPlayback:
                 source = self._source
                 if source is None:
                     break
+                if _read_would_block(source):
+                    self._gate.set()
                 chunk = source.read(frame)
                 if chunk is None:
                     break
@@ -256,15 +282,43 @@ class SpeakerPlayback:
                 gained = apply_volume(chunk, self.volume)
                 if self._stop.is_set():
                     break
-                self.speaker.write(gained)
+                self._write_samples(gained)
         except Exception as exc:
             error = exc
+        try:
+            self._finish_run(error)
+        finally:
+            self._gate.set()
+
+    def _write_samples(self, gained) -> None:
+        """Write ``gained``. Open the gate before a write that has to wait."""
+        writer = getattr(self.speaker, "write_available", None)
+        if writer is None:
+            self.speaker.write(gained)
+            return
+        offset = 0
+        while offset < len(gained):
+            if self._stop.is_set():
+                return
+            accepted = int(writer(gained[offset:]))
+            if accepted <= 0:
+                self._gate.set()
+                self.speaker.write(gained[offset:])
+                return
+            offset += accepted
+
+    def _finish_run(self, error: BaseException | None) -> None:
         # Flush outside the player lock. Stop and mute must still be able to
         # drop the queue while this wait runs, and status stays PLAYING until
         # the speaker is quiet or the tail is discarded.
+        blocking_flush = False
         if error is not None or self._stop.is_set():
             self.speaker.drop_queued()
         else:
+            waits = getattr(self.speaker, "flush_blocks", None)
+            blocking_flush = bool(waits is not None and waits())
+            if blocking_flush:
+                self._gate.set()
             self.speaker.flush()
         callback: FinishedCallback | None = None
         result: PlaybackResult
@@ -285,6 +339,8 @@ class SpeakerPlayback:
             self._on_finished = None
             if finished is not None:
                 callback = finished
+        if not blocking_flush:
+            self._gate.set()
         if callback is not None:
             callback(result)
 
@@ -325,6 +381,14 @@ def _interrupt(source: ReplyAudio | None) -> None:
     if source is None:
         return
     source.interrupt()
+
+
+def _read_would_block(source: ReplyAudio) -> bool:
+    """True when ``source.read`` would wait for audio that has not arrived."""
+    check = getattr(source, "read_would_block", None)
+    if check is None:
+        return False
+    return bool(check())
 
 
 def muted_result() -> PlaybackResult:

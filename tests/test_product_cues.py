@@ -285,14 +285,21 @@ def test_ready_reply_cuts_thinking_before_it_reaches_the_speaker(monkeypatch) ->
     session.play_reply(MemoryReplyAudio(reply, sample_rate_hz=16_000, channels=1))
     assert playback.is_cue_playing is False
     assert session.state is DeviceState.SPEAKING
+    # Pump only until the reply itself has been played. A finished reply
+    # opens the follow-up and starts the listening cue; waiting on that cue
+    # blocks, because this fake callback is the only thing that drains it.
     collected = []
-    for _ in range(8):
-        if not playback.is_playing and speaker.queued_samples == 0:
-            break
+    target = played_after_wake + len(reply)
+    deadline = time.monotonic() + 2.0
+    while speaker.played_samples < target:
+        if time.monotonic() > deadline:
+            raise AssertionError("reply audio did not leave the queue")
+        if speaker.queued_samples == 0:
+            time.sleep(0.001)
+            continue
         out = np.zeros((320, 1), dtype=np.float32)
         callback(out, 320, None, None)
         collected.append(out[:, 0].copy())
-    playback.wait()
     heard = np.concatenate(collected) if collected else np.zeros(0, dtype=np.float32)
     spoken = heard[np.abs(heard) > 1e-5]
     assert spoken.size == len(reply)

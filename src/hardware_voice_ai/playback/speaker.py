@@ -294,10 +294,27 @@ class SoundDeviceSpeaker:
                     continue
                 take = min(room, len(data) - offset)
                 piece = data[offset : offset + take]
-                self._pending = (
-                    piece if len(self._pending) == 0 else np.concatenate((self._pending, piece))
-                )
+                self._append_pending(piece)
                 offset += take
+
+    def write_available(self, samples: np.ndarray) -> int:
+        """Queue what fits right now. Return how many samples were queued.
+
+        Unlike ``write``, this does not wait for the callback to make room.
+        The playback thread uses that so it can tell the caller it is about
+        to block, and the caller can drain the callback.
+        """
+        data = np.ascontiguousarray(as_pcm(samples, self.format.channels))
+        _check_level(data)
+        with self._cv:
+            if self._closed:
+                raise RuntimeError("speaker is closed")
+            room = self._limit - len(self._pending)
+            take = min(room, len(data))
+            if take <= 0:
+                return 0
+            self._append_pending(data[:take])
+            return int(take)
 
     def drop_queued(self) -> int:
         with self._cv:
@@ -320,6 +337,11 @@ class SoundDeviceSpeaker:
             epoch = self._flush_epoch
             while len(self._pending) > 0 and not self._closed and self._flush_epoch == epoch:
                 self._cv.wait(timeout=0.05)
+
+    def flush_blocks(self) -> bool:
+        """True when ``flush`` will wait for the callback to drain the queue."""
+        with self._cv:
+            return len(self._pending) > 0 and not self._closed
 
     def close(self) -> None:
         with self._cv:
@@ -347,6 +369,13 @@ class SoundDeviceSpeaker:
 
     def retains_samples(self) -> bool:
         return False
+
+    def _append_pending(self, piece: np.ndarray) -> None:
+        if len(piece) == 0:
+            return
+        self._pending = (
+            piece if len(self._pending) == 0 else np.concatenate((self._pending, piece))
+        )
 
     def _on_audio(self, outdata: np.ndarray, frames: int, time_info: object, status: object) -> None:
         del time_info, status
