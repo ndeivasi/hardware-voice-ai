@@ -350,13 +350,15 @@ class SessionOrchestrator:
                 self._transition(DeviceState.IDLE)
 
     def _finish_turn(self, turn_id: int) -> None:
-        """Clear this turn and leave ``speaking`` only if it is still current.
+        """Clear this turn. Stay in ``speaking`` while playback is still flushing.
 
         A wake can already have cancelled this turn and opened a new capture.
-        That capture must stay. Going idle is one step, under this lock, and
-        only while this turn is still the one in ``speaking`` (or the capture
-        this turn itself still owns). VoiceLoop does not move the session to
-        idle; this method does, once.
+        That capture must stay. ``_active_turn`` is cleared once, under this
+        lock. If this turn is still the one in ``speaking`` and the speaker
+        has not finished ``flush``, the session stays in ``speaking`` so a
+        wake can stop that tail. ``_on_reply_finished`` goes idle after the
+        flush completes. If playback is already quiet, this method goes idle,
+        still once. VoiceLoop does not move the session to idle.
         """
         with self._lock:
             if self._turn_id != turn_id:
@@ -364,6 +366,8 @@ class SessionOrchestrator:
             newer_capture = self._forward_frames or self.state is DeviceState.WOKEN
             self._active_turn = None
             if newer_capture:
+                return
+            if self.state is DeviceState.SPEAKING and self.playback.is_playing:
                 return
             if self.state is not DeviceState.IDLE:
                 self._transition(DeviceState.IDLE)
@@ -478,9 +482,11 @@ class SessionOrchestrator:
             if token != self._reply_token:
                 return
             self.last_reply_result = result
-            # A model turn goes idle from ``_finish_turn``, once, under this
-            # lock. Completing playback must not idle a turn that is still
-            # current, or a wake accepted in that gap can be forced idle.
+            # ``_finish_turn`` clears the model token and leaves ``speaking``
+            # in place while ``flush`` is still running. This callback is the
+            # idle step for that tail, and only after the token is clear. A
+            # callback that arrives first must not idle the turn; ``_finish_turn``
+            # does that when playback is already quiet.
             if self._active_turn is not None:
                 return
             if (

@@ -18,6 +18,8 @@ from hardware_voice_ai.capture.port import CaptureRequest
 from hardware_voice_ai.config import DeviceConfig
 from hardware_voice_ai.errors import ModelUnavailable
 from hardware_voice_ai.mute.control import InMemoryMuteControl
+from hardware_voice_ai.playback.player import PlaybackStopReason, SpeakerPlayback
+from hardware_voice_ai.playback.speaker import SoundDeviceSpeaker
 from hardware_voice_ai.runtime import WakeRuntime
 from hardware_voice_ai.session.audio_model import AudioModel
 from hardware_voice_ai.session.orchestrator import SessionOrchestrator
@@ -629,6 +631,176 @@ def test_wake_during_speaking_barges_in_and_starts_a_new_capture() -> None:
     assert any(result.outcome is TurnOutcome.CANCELLED for result in runtime.results)
 
 
+class _FakeOutput:
+    """PortAudio stand-in. The test drives the callback; nothing is played live."""
+
+    def __init__(self) -> None:
+        self.stream: _FakeOutputStream | None = None
+
+    def OutputStream(self, **kwargs):
+        self.stream = _FakeOutputStream(**kwargs)
+        return self.stream
+
+
+class _FakeOutputStream:
+    def __init__(self, **kwargs) -> None:
+        self.kwargs = kwargs
+        self.started = False
+        self.stopped = False
+        self.closed = False
+
+    def start(self) -> None:
+        self.started = True
+
+    def stop(self) -> None:
+        self.stopped = True
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _drain(callback, frames: int = 320) -> None:
+    out = np.zeros((frames, 1), dtype=np.float32)
+    callback(out, frames, None, None)
+
+
+def _wait_until(predicate, message: str) -> None:
+    deadline = time.monotonic() + 2.0
+    while not predicate():
+        if time.monotonic() > deadline:
+            raise AssertionError(message)
+        time.sleep(0.001)
+
+
+def _flush_runtime(monkeypatch, samples: np.ndarray):
+    """Runtime whose speaker blocks in ``flush`` until the test drains it."""
+    fake = _FakeOutput()
+    monkeypatch.setitem(sys.modules, "sounddevice", fake)
+    config = DeviceConfig(audio_model="local")
+    speaker = SoundDeviceSpeaker(config.audio_format, queue_ms=200)
+    playback = SpeakerPlayback(speaker, volume=config.volume)
+    assert fake.stream is not None
+    callback = fake.stream.kwargs["callback"]
+    runtime = WakeRuntime(
+        config,
+        PcmAudioSource(samples, config.audio_format),
+        playback=playback,
+    )
+    return runtime, speaker, playback, callback
+
+
+def _reach_flush_tail(runtime, speaker, playback, callback) -> None:
+    """Play the reply until ``flush`` is waiting on a queued tail.
+
+    A full queue can also mean ``write`` is blocked. One drained frame that
+    is not replaced is the flushing tail: nothing further is coming.
+    """
+    pumped = 0
+    while pumped < 100:
+        session = runtime.orchestrator
+        if (
+            not session.model_is_running
+            and session.state is DeviceState.SPEAKING
+            and playback.is_playing
+            and not playback.is_cue_playing
+            and speaker.queued_samples > 320
+            and speaker.played_samples > 0
+        ):
+            before = speaker.queued_samples
+            _drain(callback)
+            time.sleep(0.02)
+            if (
+                0 < speaker.queued_samples < before
+                and playback.is_playing
+                and not playback.is_cue_playing
+            ):
+                return
+            pumped += 1
+            continue
+        if speaker.queued_samples >= 320:
+            _drain(callback)
+            pumped += 1
+        elif not runtime.poll():
+            time.sleep(0.001)
+    raise AssertionError("playback did not stop in flush with a queued tail")
+
+
+def test_wake_during_flush_tail_stops_playback_and_session_stays_speaking(monkeypatch) -> None:
+    """Speaking lasts through speaker flush, and a wake in that tail cuts it.
+
+    The model thread only finishes the reply stream. ``flush`` is still
+    playing that tail. The session stays in ``speaking`` until the tail
+    drains or a wake stops it and opens a new capture.
+    """
+    config = DeviceConfig(audio_model="local")
+    word = render_pattern(default_template())
+    quiet = np.concatenate((silence(1600), word, silence(32_000)))
+    runtime, speaker, playback, callback = _flush_runtime(monkeypatch, quiet)
+    try:
+        _reach_flush_tail(runtime, speaker, playback, callback)
+        assert runtime.orchestrator.state is DeviceState.SPEAKING
+        assert runtime.orchestrator.model_is_running is False
+        assert playback.is_playing is True
+        while speaker.queued_samples > 0:
+            _drain(callback)
+        _wait_until(
+            lambda: runtime.orchestrator.state is DeviceState.IDLE and not playback.is_playing,
+            "session left speaking before flush finished, or never returned to idle",
+        )
+        assert runtime.orchestrator.state is DeviceState.IDLE
+    finally:
+        runtime.close()
+
+    gap = silence(32_000)
+    both = np.concatenate((silence(1600), word, gap, word, gap))
+    pause_frames = (1600 + len(word) + 30_000) // config.frame_samples
+
+    class LimitedSource:
+        def __init__(self) -> None:
+            self._inner = PcmAudioSource(both, config.audio_format)
+            self.format = config.audio_format
+            self.limit = pause_frames
+            self.reads = 0
+
+        def read(self):
+            if self.reads >= self.limit:
+                return None
+            frame = self._inner.read()
+            if frame is not None:
+                self.reads += 1
+            return frame
+
+        def close(self) -> None:
+            self._inner.close()
+
+    source = LimitedSource()
+    fake = _FakeOutput()
+    monkeypatch.setitem(sys.modules, "sounddevice", fake)
+    hold = SoundDeviceSpeaker(config.audio_format, queue_ms=200)
+    held_playback = SpeakerPlayback(hold, volume=config.volume)
+    assert fake.stream is not None
+    held_callback = fake.stream.kwargs["callback"]
+    runtime = WakeRuntime(config, source, playback=held_playback)
+    try:
+        _reach_flush_tail(runtime, hold, held_playback, held_callback)
+        assert runtime.orchestrator.state is DeviceState.SPEAKING
+        assert runtime.orchestrator.model_is_running is False
+        assert held_playback.is_playing is True
+        assert hold.queued_samples > 0
+        source.limit = 10**9
+        while runtime.poll():
+            if runtime.orchestrator.state is DeviceState.CAPTURING:
+                break
+        assert runtime.orchestrator.state is DeviceState.CAPTURING
+        assert runtime.orchestrator.capture_is_active is True
+        assert runtime.orchestrator.last_reply_result is not None
+        assert runtime.orchestrator.last_reply_result.status is not None
+        assert runtime.orchestrator.last_reply_result.reason is PlaybackStopReason.BARGE_IN
+        assert runtime.capture.holds_audio is True
+    finally:
+        runtime.close()
+
+
 def test_wake_as_the_previous_turn_finishes_stays_in_capture() -> None:
     """A wake accepted while the old turn finishes is not forced back to idle."""
     config = DeviceConfig(audio_model="local")
@@ -698,6 +870,11 @@ def test_end_of_utterance_speaks_and_a_second_wake_is_accepted() -> None:
     runtime = WakeRuntime(config, PcmAudioSource(samples, config.audio_format))
     runtime.run()
     runtime.wait_for_turns()
+    # Idle follows speaker flush, which can finish just after the model thread.
+    _wait_until(
+        lambda: runtime.orchestrator.state is DeviceState.IDLE,
+        "spoken reply did not return to idle after flush",
+    )
     runtime.close()
     trace = runtime.orchestrator.trace
     entered_speaking = sum(
