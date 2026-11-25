@@ -76,14 +76,9 @@ On an accepted wake the orchestrator moves `idle → woken`, calls `CapturePort.
 
 The decision frame is the last frame in the snapshot. Later microphone frames are delivered to `CapturePort.on_frame` until the tap stops. Issue 2 should treat the snapshot as the start of the utterance and `on_frame` as the continuation.
 
-`PendingCapturePort` records that handoff. Its `on_frame` discards samples. It does not look for silence, and this package does not call end-of-utterance by itself. After the handoff the session stays in `capturing` with the tap open, so a command that starts immediately is still delivered to capture. Trailing silence does not end the turn.
+`PendingCapturePort` records that handoff and drops later samples. Tests that need the tap to stay open pass it in explicitly. `WakeRuntime` does not use it by default. The default capture is `UtteranceCapture`, and the runtime binds that object to the real `SessionOrchestrator` before audio starts. Callers do not call `bind_session`.
 
-Issue 2 fills in:
-
-- utterance buffering on top of the pre-roll and `on_frame`
-- end-of-utterance, then `SessionOrchestrator.close_capture()`
-- `close_capture` stops the tap with reason `end_of_utterance` and leaves the session in `capturing` for the later audio-model work
-- any hardware microphone configuration beyond opening the swappable source
+`UtteranceCapture` keeps the pre-roll plus the frames after the decision. Silence ends the utterance through `SessionOrchestrator.close_capture`. That stops the tap with `end_of_utterance` and leaves the session in `capturing`. The utterance, including the pre-roll, is queued on `runtime.utterances` for the Audio Model. See `docs/capture.md`.
 
 `close_capture` does not run a model and does not enter `transcribing`.
 
@@ -93,7 +88,6 @@ Issue 2 should not upload always-on audio. Only the post-wake utterance, includi
 
 ## What this package does not do
 
-- Microphone capture beyond the shared reader, the pre-roll, and the capture port (issue 2).
-- The local or remote audio model, the cloud gateway, and speaker playback (issues 3–6).
+- The local or remote audio model, the cloud gateway, and speaker playback (issues 3–6). Post-wake utterance capture is `UtteranceCapture`; see `docs/capture.md`.
 - A separate speech-to-text or text-to-speech setting or pipeline stage.
 - Choosing the production wake word, training a far-field speech model, or selecting the board.

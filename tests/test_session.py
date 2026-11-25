@@ -1,6 +1,4 @@
-"""Session handoff, mute, and the capture boundary left for issue 2."""
-
-from dataclasses import replace
+"""Session handoff, mute, and microphone capture."""
 
 import numpy as np
 import pytest
@@ -8,6 +6,7 @@ import pytest
 from hardware_voice_ai.audio.frame import AudioFormat, AudioSnapshot
 from hardware_voice_ai.audio.source import PcmAudioSource
 from hardware_voice_ai.capture.port import CaptureStopReason, PendingCapturePort
+from hardware_voice_ai.capture.utterance import UtteranceCapture
 from hardware_voice_ai.config import DeviceConfig
 from hardware_voice_ai.mute.control import InMemoryMuteControl
 from hardware_voice_ai.runtime import WakeRuntime
@@ -347,16 +346,15 @@ def test_source_format_must_match_config() -> None:
         WakeRuntime(config, source)
 
 
-def test_default_capture_port_is_the_pending_stub() -> None:
-    config = replace(DeviceConfig(), cooldown_ms=0)
-    samples = np.concatenate(
-        (silence(1600), render_pattern(default_template()), silence(8000))
+def test_default_capture_port_is_utterance_capture() -> None:
+    config = DeviceConfig()
+    runtime = WakeRuntime(
+        config,
+        PcmAudioSource(silence(config.frame_samples), config.audio_format),
     )
-    runtime = WakeRuntime(config, PcmAudioSource(samples, config.audio_format))
-    assert isinstance(runtime.capture, PendingCapturePort)
+    assert isinstance(runtime.capture, UtteranceCapture)
+    assert runtime.utterances is not None
     runtime.run()
-    assert isinstance(runtime.capture, PendingCapturePort)
-    assert runtime.capture.active is True
-    assert runtime.capture.request is not None
-    assert runtime.capture.stop_reasons == []
+    assert runtime.orchestrator.state is DeviceState.IDLE
+    assert runtime.utterances.take() is None
     runtime.close()
