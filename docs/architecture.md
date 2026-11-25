@@ -150,7 +150,7 @@ The mermaid diagram above is the primary high-level view, including Audio Model 
 
 The device owns the session state machine: `idle → woken → capturing → speaking → idle`. During the turn the Audio Model receives the user's audio and produces the spoken reply. The model runs off the microphone thread, so the always-on loop keeps reading frames. Playback of that reply is local and can begin while the reply is still streaming. The session stays in `speaking` until that playback finishes flushing, so a wake during the tail still stops the speaker. Cancel and hardware mute return the session to `idle` from any later state. Hardware mute stops playback and does not resume it when released. A wake accepted during `speaking` cancels that Audio Model turn, stops playback, and starts a new capture. A local cue is kept out of the capture buffer and is not accepted as another wake.
 
-`DeviceState` still includes `transcribing` and `thinking` from an earlier draft of this chain. Speaker playback enters `speaking` from `capturing` after the microphone tap closes. Removing `transcribing` and `thinking` remains a follow-up. Those names are not Audio Model settings, and this package does not run them.
+`DeviceState` is that chain: `idle`, `woken`, `capturing`, and `speaking`. Speaker playback enters `speaking` from `capturing` after the microphone tap closes.
 
 ### Component placement
 
@@ -203,7 +203,7 @@ These are recommended targets for Audio Model `remote` on a powered device and a
 - [Issue 3](https://github.com/ndeivasi/hardware-voice-ai/issues/3), [issue 4](https://github.com/ndeivasi/hardware-voice-ai/issues/4), and [issue 5](https://github.com/ndeivasi/hardware-voice-ai/issues/5) are one Audio Model voice loop. It receives the user's audio and produces the spoken reply. A `remote` Audio Model talks to the cloud gateway behind stable interfaces, and the device must not hard-code a vendor. A `local` Audio Model does not send that turn off the device for the model call. The model runs off the microphone thread. A wake during speaking cancels the turn, stops playback, and starts a new capture.
 - [Issue 6](https://github.com/ndeivasi/hardware-voice-ai/issues/6) (speaker playback) is implemented on the device: reply audio, volume, interruption, and local wake, offline, and error cues. See [playback.md](playback.md). A wake during speaking cuts playback. Hardware mute stops playback and does not resume it when released. Local cues are kept out of capture and wake scoring.
 - [Issues 7–9](https://github.com/ndeivasi/hardware-voice-ai/issues/7) remain open.
-- `DeviceState` still includes `transcribing` and `thinking`. Playback enters `speaking` from `capturing`. Removing the unused states remains a follow-up.
+- `DeviceState` is `idle`, `woken`, `capturing`, and `speaking`. Playback enters `speaking` from `capturing` after the microphone tap closes.
 
 This baseline is the approved answer to [issue 10](https://github.com/ndeivasi/hardware-voice-ai/issues/10), which is closed as completed. [Issue 11](https://github.com/ndeivasi/hardware-voice-ai/issues/11) remains open for later architecture changes, which should be approved before they replace this baseline.
 
