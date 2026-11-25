@@ -99,7 +99,14 @@ class WakeRuntime:
                 return
             self.buffer.write(frame)
             if self.orchestrator.capture_is_active:
-                self.capture.on_frame(frame)
+                try:
+                    self.capture.on_frame(frame)
+                except Exception:
+                    # on_frame failed (a frame index or format mismatch).
+                    # Cancel drops the utterance, records the failed capture
+                    # on the capture log, and returns the session to idle.
+                    # Keep reading the microphone.
+                    self.orchestrator.cancel()
             event = self.engine.process(frame)
             if event is None:
                 return

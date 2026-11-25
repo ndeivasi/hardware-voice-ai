@@ -544,6 +544,118 @@ def test_default_runtime_binds_capture_and_hands_off_the_preroll() -> None:
     assert runtime.capture.holds_audio is False
 
 
+class _IndexGapSource:
+    """Finite silence. One frame's ``sample_index`` skips ahead by one frame."""
+
+    def __init__(self, frame_count: int, gap_at: int, fmt: AudioFormat) -> None:
+        self.format = fmt
+        self._frame_count = frame_count
+        self._gap_at = gap_at
+        self._next = 0
+        self._sample_index = 0
+
+    def read(self) -> AudioFrame | None:
+        if self._next >= self._frame_count:
+            return None
+        if self._next == self._gap_at:
+            self._sample_index += self.format.frame_samples
+        frame = AudioFrame(
+            samples=np.zeros(
+                (self.format.frame_samples, self.format.channels),
+                dtype=np.float32,
+            ),
+            format=self.format,
+            sample_index=self._sample_index,
+        )
+        self._sample_index += self.format.frame_samples
+        self._next += 1
+        return frame
+
+    def close(self) -> None:
+        return None
+
+
+def test_on_frame_mismatch_returns_to_idle_and_keeps_listening(tmp_path: Path) -> None:
+    """A frame-index CaptureError cancels the turn and the loop keeps reading.
+
+    Uses the real ``WakeRuntime``, ``UtteranceCapture``, and
+    ``SessionOrchestrator``. The capture object still raises; the runtime
+    is what returns the session to idle.
+    """
+    from dataclasses import replace
+
+    from hardware_voice_ai.capture.endpoint import EndpointConfig
+    from hardware_voice_ai.config import DeviceConfig
+    from hardware_voice_ai.runtime import WakeRuntime
+    from hardware_voice_ai.session.orchestrator import SessionOrchestrator
+    from hardware_voice_ai.session.state import DeviceState
+    from tests.support import MemoryLog, ScriptedModel
+
+    config = replace(
+        DeviceConfig(),
+        accept_threshold=0.6,
+        min_positive_ms=120,
+        confirm_ms=240,
+        cooldown_ms=0,
+        max_word_ms=1000,
+        end_ratio=0.85,
+    )
+    word = [0.9] * (config.min_positive_ms // config.frame_ms)
+    confirm = [0.0] * (config.confirm_ms // config.frame_ms)
+    first_wake = word + confirm
+    # The decision lands on the last confirm frame. The next read is on_frame.
+    gap_at = len(first_wake)
+    second_wake = word + confirm
+    trailing = [0.0] * (EndpointConfig().max_leading_silence_ms // config.frame_ms)
+    scores = first_wake + [0.0] + second_wake + trailing
+    log_path = tmp_path / "capture.log"
+    sink = QueueUtteranceSink()
+    capture = UtteranceCapture(sink, log=CaptureLog(log_path))
+    detection = MemoryLog()
+    runtime = WakeRuntime(
+        config,
+        _IndexGapSource(len(scores), gap_at, config.audio_format),
+        model=ScriptedModel(scores=list(scores)),
+        capture=capture,
+        detection_log=detection,
+    )
+    assert isinstance(runtime.orchestrator, SessionOrchestrator)
+    assert isinstance(runtime.capture, UtteranceCapture)
+    assert runtime.capture is capture
+
+    while runtime.orchestrator.state is not DeviceState.CAPTURING:
+        assert runtime.poll()
+    assert capture.holds_audio is True
+    assert runtime.poll() is True
+    assert runtime.orchestrator.state is DeviceState.IDLE
+    assert runtime.orchestrator.capture_is_active is False
+    assert capture.active is False
+    assert capture.holds_audio is False
+    assert sink.drain() == []
+    failed = log_path.read_text(encoding="utf-8").splitlines()
+    assert len(failed) == 2
+    assert failed[0].startswith("event=start ")
+    assert "reason=cancel" in failed[1]
+    assert "handed_off=False" in failed[1]
+    assert [accepted for _event, accepted, _model in detection.records] == [True]
+
+    runtime.run()
+    runtime.close()
+    utterance = sink.take()
+    assert utterance is not None
+    assert sink.take() is None
+    assert utterance.endpoint == "leading_silence"
+    assert utterance.pre_roll_sample_count > 0
+    assert runtime.orchestrator.state is DeviceState.CAPTURING
+    assert runtime.orchestrator.capture_is_active is False
+    assert capture.holds_audio is False
+    assert [accepted for _event, accepted, _model in detection.records] == [True, True]
+    finished = log_path.read_text(encoding="utf-8").splitlines()
+    assert len(finished) == 4
+    assert "reason=end_of_utterance" in finished[-1]
+    assert "handed_off=True" in finished[-1]
+
+
 def test_real_orchestrator_cancel_drops_the_utterance() -> None:
     from hardware_voice_ai.runtime import WakeRuntime
     from hardware_voice_ai.session.state import DeviceState
