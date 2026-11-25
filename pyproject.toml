@@ -18,9 +18,17 @@ wake = ["openwakeword>=0.6.0"]
 dev = ["pytest>=8.0"]
 # Remote speech-to-speech adapters. Install these on the GPU host only.
 # The device, the wake path, and the tests do not need them.
-moshi = ["moshi", "torch", "huggingface_hub", "sentencepiece"]
-minicpm = ["torch", "transformers", "librosa"]
-qwen = ["torch", "transformers>=5.2.0"]
+# Pinned to the releases these loaders were written against.
+# moshi 0.2.13 requires torch>=2.2,<2.10. Qwen3-Omni Instruct asks for
+# transformers>=5.2; 5.24.1 is the current release in that line.
+moshi = [
+    "moshi==0.2.13",
+    "torch==2.9.1",
+    "huggingface_hub>=0.24,<1",
+    "sentencepiece>=0.2,<0.3",
+]
+minicpm = ["torch==2.9.1", "transformers==5.24.1", "librosa"]
+qwen = ["torch==2.9.1", "transformers==5.24.1"]
 
 [project.scripts]
 hardware-voice-ai = "hardware_voice_ai.__main__:main"

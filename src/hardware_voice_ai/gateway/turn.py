@@ -7,6 +7,7 @@ utterance after wake and reads spoken audio back.
 
 import hmac
 import threading
+import time
 
 import numpy as np
 
@@ -27,6 +28,11 @@ from hardware_voice_ai.gateway.framing import (
 from hardware_voice_ai.gateway.settings import GatewaySettings
 
 MAX_UTTERANCE_S = 30.0
+# A client that connects and stops sending must not hold the only turn slot.
+READ_TIMEOUT_S = 15.0
+# While the reply is running, poll often enough to notice cancel or to stop.
+POLL_TIMEOUT_S = 0.05
+TURN_DEADLINE_S = 45.0
 _MIN_RATE = 8_000
 _MAX_RATE = 48_000
 
@@ -55,13 +61,17 @@ def serve_turn(
     settings: GatewaySettings,
     *,
     max_utterance_s: float = MAX_UTTERANCE_S,
+    turn_deadline_s: float = TURN_DEADLINE_S,
 ) -> None:
     """Read one device turn and write the spoken reply, or one error."""
     reader = FrameReader(stream)
+    _set_timeout(stream, READ_TIMEOUT_S)
     try:
-        _exchange(reader, stream, backend, settings, max_utterance_s)
+        _exchange(reader, stream, backend, settings, max_utterance_s, turn_deadline_s)
     except (BrokenPipeError, ConnectionError):
         return
+    except TimeoutError:
+        _try_error(stream, "timeout", "audio model timed out")
     except (RemoteBackendError, ConfigurationError):
         _try_error(stream, "unavailable", "remote audio model is unavailable")
     except FramingError:
@@ -70,21 +80,29 @@ def serve_turn(
         _try_error(stream, "failed", "audio model failed")
 
 
-def _exchange(reader, stream, backend, settings: GatewaySettings, max_utterance_s: float) -> None:
-    hello = _expect_text(reader, "hello")
+def _exchange(
+    reader,
+    stream,
+    backend,
+    settings: GatewaySettings,
+    max_utterance_s: float,
+    turn_deadline_s: float,
+) -> None:
+    deadline = time.monotonic() + turn_deadline_s
+    hello = _expect_text(reader, "hello", deadline)
     if hello.get("audio_model") != "remote":
         raise FramingError("hello is not the remote audio model")
     _check_token(settings.token, hello.get("authorization", None))
     _check_backend(settings.backend_id, hello.get("backend", None))
 
-    start = _expect_text(reader, "audio_start")
+    start = _expect_text(reader, "audio_start", deadline)
     rate = _rate(start.get("sample_rate_hz"))
     channels = _channels(start.get("channels"))
     pieces: list[np.ndarray] = []
     total = 0
     limit = int(rate * max_utterance_s)
     while True:
-        frame = reader.read_frame()
+        frame = _read_frame(reader, deadline)
         if frame is None:
             raise FramingError("turn ended before audio_end")
         kind, payload = frame
@@ -112,27 +130,95 @@ def _exchange(reader, stream, backend, settings: GatewaySettings, max_utterance_
         raise FramingError("utterance audio is not finite")
 
     cancel = threading.Event()
+    stop = threading.Event()
+    timed_out = threading.Event()
+    # Poll while the model runs. A 15s utterance timeout would hide cancel
+    # until the next full wait, and would delay closing the turn.
+    _set_timeout(stream, POLL_TIMEOUT_S)
+    watcher = threading.Thread(
+        target=_watch_reply,
+        args=(reader, cancel, stop, timed_out, deadline),
+        daemon=True,
+    )
+    watcher.start()
     reply_rate: int | None = None
     reply_channels: int | None = None
     wrote_audio = False
-    for chunk in backend.speak(utterance, rate, channels, cancel):
-        spoken = _fit(chunk, rate, channels)
-        if reply_rate is None:
-            reply_rate = rate
-            reply_channels = channels
-            _write(stream, encode_text({
-                "type": "reply_start",
-                "sample_rate_hz": reply_rate,
-                "channels": reply_channels,
-            }))
-        frame_samples = max(1, rate * 20 // 1000)
-        for piece in iter_chunks(spoken, frame_samples):
-            _write(stream, encode_audio(piece))
-            wrote_audio = True
+    try:
+        for chunk in backend.speak(utterance, rate, channels, cancel):
+            # This chunk was already produced. Write it, then stop if the
+            # client cancelled or the deadline fired before the next one.
+            spoken = _fit(chunk, rate, channels)
+            if reply_rate is None:
+                reply_rate = rate
+                reply_channels = channels
+                _write(stream, encode_text({
+                    "type": "reply_start",
+                    "sample_rate_hz": reply_rate,
+                    "channels": reply_channels,
+                }))
+            frame_samples = max(1, rate * 20 // 1000)
+            for piece in iter_chunks(spoken, frame_samples):
+                _write(stream, encode_audio(piece))
+                wrote_audio = True
+                if cancel.is_set() or timed_out.is_set():
+                    break
+            if cancel.is_set() or timed_out.is_set():
+                break
+    finally:
+        stop.set()
+        watcher.join(timeout=1.0)
+    if timed_out.is_set():
+        _try_error(stream, "timeout", "audio model timed out")
+        return
+    if cancel.is_set():
+        return
     if not wrote_audio:
         _send_error(stream, "failed", "audio model failed")
         return
     _write(stream, encode_text({"type": "end"}))
+
+
+def _watch_reply(reader, cancel, stop, timed_out, deadline: float) -> None:
+    """Set ``cancel`` when the client sends cancel, hangs up, or the deadline passes."""
+    while not stop.is_set():
+        if time.monotonic() >= deadline:
+            timed_out.set()
+            cancel.set()
+            return
+        try:
+            frame = reader.read_frame()
+        except TimeoutError:
+            continue
+        except Exception:
+            cancel.set()
+            return
+        if frame is None:
+            cancel.set()
+            return
+        kind, payload = frame
+        if kind != TEXT:
+            continue
+        try:
+            message = decode_text(payload)
+        except FramingError:
+            cancel.set()
+            return
+        if message.get("type") == "cancel":
+            cancel.set()
+            return
+
+
+def _read_frame(reader: FrameReader, deadline: float):
+    if time.monotonic() >= deadline:
+        raise TimeoutError
+    return reader.read_frame()
+
+
+def _set_timeout(stream, timeout_s: float) -> None:
+    setter = getattr(stream, "set_timeout", None)
+    if setter is not None:
+        setter(timeout_s)
 
 
 def _fit(chunk: SpokenChunk, rate: int, channels: int) -> np.ndarray:
@@ -141,9 +227,7 @@ def _fit(chunk: SpokenChunk, rate: int, channels: int) -> np.ndarray:
 
 
 def _check_token(expected: str, presented: object) -> None:
-    if presented is None:
-        presented = ""
-    if not isinstance(presented, str):
+    if not expected or not isinstance(presented, str) or not presented:
         _reject()
     if not hmac.compare_digest(expected, presented):
         _reject()
@@ -162,8 +246,8 @@ def _check_backend(running: str, requested: object) -> None:
         raise ConfigurationError("gateway is not serving that audio model.")
 
 
-def _expect_text(reader: FrameReader, name: str) -> dict:
-    frame = reader.read_frame()
+def _expect_text(reader: FrameReader, name: str, deadline: float) -> dict:
+    frame = _read_frame(reader, deadline)
     if frame is None:
         raise FramingError("session ended early")
     kind, payload = frame

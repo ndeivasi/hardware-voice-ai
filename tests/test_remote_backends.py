@@ -7,6 +7,7 @@ import ssl
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 import numpy as np
@@ -40,22 +41,49 @@ from hardware_voice_ai.gateway.turn import TurnGateway, serve_turn
 from hardware_voice_ai.session.audio_model import AudioModel
 
 
+TOKEN = "test-token"
+
+
 class MemoryStream:
-    def __init__(self, incoming: bytes = b"", read_size: int | None = None) -> None:
+    """In-memory duplex.
+
+    A finished buffer used only to parse frames treats an empty read as EOF.
+    A session stream raises ``TimeoutError`` when it has no bytes yet, and
+    returns ``b""`` after ``close_peer``. That matches a socket: stall versus
+    hangup.
+    """
+
+    def __init__(
+        self,
+        incoming: bytes = b"",
+        read_size: int | None = None,
+        *,
+        session: bool = False,
+    ) -> None:
         self.incoming = bytearray(incoming)
         self.outgoing = bytearray()
         self.read_size = read_size
         self.closed = False
+        self.peer_closed = False
+        self.session = session
+        self._cv = threading.Condition()
+
+    def set_timeout(self, timeout_s: float) -> None:
+        del timeout_s
 
     def read(self, n: int) -> bytes:
-        if not self.incoming:
-            return b""
-        take = min(n, len(self.incoming))
-        if self.read_size is not None:
-            take = min(take, self.read_size)
-        out = bytes(self.incoming[:take])
-        del self.incoming[:take]
-        return out
+        with self._cv:
+            while not self.incoming:
+                if self.peer_closed or not self.session:
+                    return b""
+                if not self._cv.wait(timeout=0.02):
+                    raise TimeoutError
+            take = min(n, len(self.incoming))
+            if self.read_size is not None:
+                take = min(take, self.read_size)
+            out = bytes(self.incoming[:take])
+            del self.incoming[:take]
+            return out
 
     def write(self, data: bytes) -> None:
         if self.closed:
@@ -64,6 +92,20 @@ class MemoryStream:
 
     def close(self) -> None:
         self.closed = True
+
+    def close_peer(self) -> None:
+        with self._cv:
+            self.peer_closed = True
+            self._cv.notify_all()
+
+
+def _settings(**kwargs) -> GatewaySettings:
+    kwargs.setdefault("token", TOKEN)
+    return GatewaySettings(**kwargs)
+
+
+def _open(data: bytes, **kwargs) -> MemoryStream:
+    return MemoryStream(data, session=True, **kwargs)
 
 
 class Scripted:
@@ -85,7 +127,7 @@ def _pcm(rows: int, channels: int = 1, value: float = 0.25) -> np.ndarray:
 def _client(
     pcm: np.ndarray,
     *,
-    token: str = "",
+    token: str = TOKEN,
     backend: str | None = None,
     rate: int = 16_000,
     cancel: bool = False,
@@ -140,7 +182,13 @@ def test_remote_catalog_defaults_to_moshi_and_keeps_the_local_stand_in() -> None
     assert parse_remote_backend("Moshi") == "moshi"
     assert parse_remote_backend("minicpm") == "minicpm-o-4.5"
     assert parse_remote_backend("qwen3-omni-instruct") == "qwen3-omni"
-    assert GatewaySettings().backend_id == "moshi"
+    assert _settings().backend_id == "moshi"
+    with pytest.raises(ConfigurationError, match="HVA_GATEWAY_TOKEN"):
+        GatewaySettings(token="")
+    with pytest.raises(ConfigurationError, match="HVA_GATEWAY_TOKEN"):
+        GatewaySettings(token="   ")
+    with pytest.raises(ConfigurationError, match="HVA_GATEWAY_TOKEN"):
+        settings_from_env({})
     assert {item.value for item in AudioModel} == {"local", "remote"}
     with pytest.raises(ConfigurationError, match="local Audio Model stand-in"):
         parse_remote_backend("reference-audio-v1")
@@ -165,7 +213,7 @@ def test_settings_hide_the_token_and_reject_a_url_host() -> None:
     assert "super-secret" not in rendered
     assert "token=set" in rendered
     with pytest.raises(ConfigurationError, match="host"):
-        GatewaySettings(host="tls://gpu.example")
+        GatewaySettings(token="t", host="tls://gpu.example")
     with pytest.raises(ConfigurationError, match="single line"):
         GatewaySettings(token="one\ntwo")
 
@@ -189,8 +237,8 @@ def test_text_and_audio_frames_match_the_device_session() -> None:
 def test_turn_uses_the_gateway_default_when_hello_omits_backend() -> None:
     reply = SpokenChunk(_pcm(1600), 16_000)
     backend = Scripted([reply])
-    stream = MemoryStream(_client(_pcm(640)), read_size=3)
-    serve_turn(stream, backend, GatewaySettings(backend_id="moshi"))
+    stream = _open(_client(_pcm(640)), read_size=3)
+    serve_turn(stream, backend, _settings(backend_id="moshi"))
     assert len(backend.seen) == 1
     utterance, rate, channels = backend.seen[0]
     assert utterance.shape == (640, 1)
@@ -208,8 +256,8 @@ def test_turn_uses_the_gateway_default_when_hello_omits_backend() -> None:
 
 def test_hello_backend_must_match_the_loaded_model() -> None:
     backend = Scripted([SpokenChunk(_pcm(320), 16_000)])
-    stream = MemoryStream(_client(_pcm(320), backend="qwen3-omni"))
-    serve_turn(stream, backend, GatewaySettings(backend_id="moshi"))
+    stream = _open(_client(_pcm(320), backend="qwen3-omni"))
+    serve_turn(stream, backend, _settings(backend_id="moshi"))
     assert backend.seen == []
     message = _texts(bytes(stream.outgoing))[0]
     assert message["type"] == "error"
@@ -221,7 +269,7 @@ def test_exact_device_hello_with_token_round_trips() -> None:
     reply = SpokenChunk(np.full((2400, 1), 0.5, dtype=np.float32), 24_000)
     backend = Scripted([reply])
     pcm = _pcm(320, channels=2, value=0.4)
-    stream = MemoryStream(_client(pcm, token=token))
+    stream = _open(_client(pcm, token=token))
     serve_turn(stream, backend, GatewaySettings(token=token))
     assert backend.seen[0][0].shape == (320, 2)
     start = _texts(bytes(stream.outgoing))[0]
@@ -236,7 +284,7 @@ def test_exact_device_hello_with_token_round_trips() -> None:
 def test_bad_token_is_not_echoed() -> None:
     token = "super-secret-token"
     backend = Scripted([SpokenChunk(_pcm(320), 16_000)])
-    stream = MemoryStream(_client(_pcm(320), token="nope"))
+    stream = _open(_client(_pcm(320), token="nope"))
     serve_turn(stream, backend, GatewaySettings(token=token))
     assert backend.seen == []
     raw = bytes(stream.outgoing)
@@ -245,21 +293,127 @@ def test_bad_token_is_not_echoed() -> None:
     assert _texts(raw)[0]["code"] == "unavailable"
 
 
+def test_missing_or_empty_authorization_is_rejected() -> None:
+    backend = Scripted([SpokenChunk(_pcm(320), 16_000)])
+    omitted = _open(_client(_pcm(320), token=""))
+    serve_turn(omitted, backend, _settings())
+    assert backend.seen == []
+    assert _texts(bytes(omitted.outgoing))[0]["code"] == "unavailable"
+
+    hello = encode_text({
+        "type": "hello",
+        "audio_model": "remote",
+        "authorization": "",
+    })
+    rest = _client(_pcm(320))
+    # Drop the real hello and use the empty authorization one.
+    empty = _open(hello + rest[rest.index(encode_text({"type": "audio_start", "sample_rate_hz": 16000, "channels": 1})) :])
+    serve_turn(empty, backend, _settings())
+    assert backend.seen == []
+    assert _texts(bytes(empty.outgoing))[0]["code"] == "unavailable"
+    assert TOKEN.encode() not in bytes(omitted.outgoing)
+
+
+def test_cancel_during_reply_stops_further_audio() -> None:
+    class TwoChunks:
+        def speak(self, utterance, sample_rate_hz, channels, cancel):
+            del utterance, sample_rate_hz, channels
+            yield SpokenChunk(_pcm(320, value=0.2), 16_000)
+            if not cancel.wait(2):
+                raise AssertionError("cancel was not observed during the reply")
+
+    stream = _open(_client(_pcm(320)) + encode_text({"type": "cancel"}))
+    serve_turn(stream, TwoChunks(), _settings())
+    messages = _texts(bytes(stream.outgoing))
+    assert [item["type"] for item in messages] == ["reply_start"]
+    heard = _audio(bytes(stream.outgoing), 1)
+    assert heard.shape == (320, 1)
+    assert np.allclose(heard, 0.2, atol=1 / 32767)
+
+
+def test_disconnect_during_reply_stops_further_audio() -> None:
+    class TwoChunks:
+        def speak(self, utterance, sample_rate_hz, channels, cancel):
+            del utterance, sample_rate_hz, channels
+            yield SpokenChunk(_pcm(320, value=0.2), 16_000)
+            if not cancel.wait(2):
+                raise AssertionError("disconnect was not observed during the reply")
+
+    stream = _open(_client(_pcm(320)))
+    stream.close_peer()
+    serve_turn(stream, TwoChunks(), _settings())
+    assert [item["type"] for item in _texts(bytes(stream.outgoing))] == ["reply_start"]
+    assert _audio(bytes(stream.outgoing), 1).shape == (320, 1)
+
+
+def test_stalled_client_receives_timeout_instead_of_holding_the_turn() -> None:
+    class Stalled:
+        def __init__(self) -> None:
+            self.outgoing = bytearray()
+
+        def read(self, n: int) -> bytes:
+            del n
+            raise TimeoutError
+
+        def write(self, data: bytes) -> None:
+            self.outgoing.extend(data)
+
+    stream = Stalled()
+    backend = Scripted([SpokenChunk(_pcm(320), 16_000)])
+    serve_turn(stream, backend, _settings())
+    assert backend.seen == []
+    message = _texts(bytes(stream.outgoing))[0]
+    assert message["code"] == "timeout"
+    assert message["message"] == "audio model timed out"
+
+
+def test_turn_deadline_cancels_a_model_that_does_not_return() -> None:
+    class Stuck:
+        def speak(self, utterance, sample_rate_hz, channels, cancel):
+            del utterance, sample_rate_hz, channels
+            if not cancel.wait(2):
+                raise AssertionError("the turn deadline did not cancel the model")
+            return
+            yield SpokenChunk(_pcm(320), 16_000)
+
+    stream = _open(_client(_pcm(320)))
+    serve_turn(stream, Stuck(), _settings(), turn_deadline_s=0.05)
+    message = _texts(bytes(stream.outgoing))[0]
+    assert message["code"] == "timeout"
+
+
+def test_socket_read_times_out() -> None:
+    left, right = socket.socketpair()
+    try:
+        stream = SocketStream(left, timeout_s=0.1)
+        started = time.monotonic()
+        with pytest.raises(TimeoutError):
+            stream.read(4)
+        assert time.monotonic() - started < 1.0
+    finally:
+        left.close()
+        right.close()
+
+
 def test_cancel_before_audio_end_does_not_run_the_model() -> None:
     backend = Scripted([SpokenChunk(_pcm(320), 16_000)])
-    stream = MemoryStream(_client(_pcm(320), cancel=True))
-    serve_turn(stream, backend, GatewaySettings())
+    stream = _open(_client(_pcm(320), cancel=True))
+    serve_turn(stream, backend, _settings())
     assert backend.seen == []
     assert stream.outgoing == b""
 
 
 def test_empty_utterance_is_low_confidence_audio_not_a_transcript() -> None:
     backend = Scripted([SpokenChunk(_pcm(320), 16_000)])
-    hello = encode_text({"type": "hello", "audio_model": "remote"})
+    hello = encode_text({
+        "type": "hello",
+        "audio_model": "remote",
+        "authorization": TOKEN,
+    })
     start = encode_text({"type": "audio_start", "sample_rate_hz": 16000, "channels": 1})
     end = encode_text({"type": "audio_end"})
-    stream = MemoryStream(hello + start + end)
-    serve_turn(stream, backend, GatewaySettings())
+    stream = _open(hello + start + end)
+    serve_turn(stream, backend, _settings())
     assert backend.seen == []
     message = _texts(bytes(stream.outgoing))[0]
     assert message == {
@@ -271,8 +425,8 @@ def test_empty_utterance_is_low_confidence_audio_not_a_transcript() -> None:
 
 def test_overlong_utterance_is_refused() -> None:
     backend = Scripted([SpokenChunk(_pcm(320), 16_000)])
-    stream = MemoryStream(_client(_pcm(640)))
-    serve_turn(stream, backend, GatewaySettings(), max_utterance_s=0.02)
+    stream = _open(_client(_pcm(640)))
+    serve_turn(stream, backend, _settings(), max_utterance_s=0.02)
     assert backend.seen == []
     assert _texts(bytes(stream.outgoing))[0]["code"] == "failed"
 
@@ -283,17 +437,17 @@ def test_model_failure_does_not_leak_internals() -> None:
             del utterance, sample_rate_hz, channels, cancel
             raise RuntimeError("super-secret-token")
 
-    stream = MemoryStream(_client(_pcm(320)))
-    serve_turn(stream, Boom(), GatewaySettings())
+    stream = _open(_client(_pcm(320)))
+    serve_turn(stream, Boom(), _settings())
     raw = bytes(stream.outgoing)
     assert b"super-secret-token" not in raw
     assert _texts(raw)[0]["message"] == "audio model failed"
 
 
 def test_a_second_connection_is_refused_while_a_turn_holds_the_model() -> None:
-    gateway = TurnGateway(GatewaySettings(), Scripted([SpokenChunk(_pcm(320), 16_000)]))
+    gateway = TurnGateway(_settings(), Scripted([SpokenChunk(_pcm(320), 16_000)]))
     assert gateway._lock.acquire(blocking=False)
-    stream = MemoryStream(_client(_pcm(320)))
+    stream = _open(_client(_pcm(320)))
     try:
         gateway.handle(stream)
     finally:
@@ -301,14 +455,14 @@ def test_a_second_connection_is_refused_while_a_turn_holds_the_model() -> None:
     assert _texts(bytes(stream.outgoing))[0]["code"] == "unavailable"
 
 
-def test_one_stream_stops_after_a_single_turn() -> None:
+def test_one_connection_runs_one_turn() -> None:
     first = _client(_pcm(320))
     second = _client(_pcm(320, value=0.1))
-    stream = MemoryStream(first + second)
+    stream = _open(first + second)
     backend = Scripted([SpokenChunk(_pcm(320), 16_000)])
-    serve_turn(stream, backend, GatewaySettings())
+    serve_turn(stream, backend, _settings())
     assert len(backend.seen) == 1
-    assert stream.incoming[:5] == second[:5]
+    assert _texts(bytes(stream.outgoing))[-1]["type"] == "end"
 
 
 def test_moshi_stepper_calls_encode_step_and_decode() -> None:
@@ -501,13 +655,14 @@ def test_loaders_fail_closed_without_vendor_libraries(monkeypatch) -> None:
         return real(name, globals, locals, fromlist, level)
 
     monkeypatch.setattr("builtins.__import__", blocked)
-    moshi = GatewaySettings(backend_id="moshi", device="cpu")
+    moshi = GatewaySettings(backend_id="moshi", device="cpu", token=TOKEN)
     minicpm = GatewaySettings(
         backend_id="minicpm-o-4.5",
         device="cpu",
+        token=TOKEN,
         minicpm_ref_audio="clip.wav",
     )
-    qwen = GatewaySettings(backend_id="qwen3-omni", device="cpu")
+    qwen = GatewaySettings(backend_id="qwen3-omni", device="cpu", token=TOKEN)
     with pytest.raises(RemoteBackendError, match="Moshi is not installed"):
         load_moshi(moshi)
     with pytest.raises(RemoteBackendError, match="MiniCPM-o is not installed"):
@@ -520,7 +675,7 @@ def test_loaders_fail_closed_without_vendor_libraries(monkeypatch) -> None:
 
 def test_minicpm_ref_clip_is_required_and_not_invented() -> None:
     with pytest.raises(RemoteBackendError, match="HVA_MINICPM_REF_AUDIO"):
-        load_minicpm(GatewaySettings(backend_id="minicpm-o-4.5", device="cpu"))
+        load_minicpm(GatewaySettings(backend_id="minicpm-o-4.5", device="cpu", token=TOKEN))
     with pytest.raises(RemoteBackendError, match="does not include one"):
         MiniCPMSession(object(), np.zeros(0, dtype=np.float32))
 
@@ -575,6 +730,8 @@ def test_cli_selects_a_backend_without_loading_weights(monkeypatch, capsys) -> N
     assert "super-secret" not in capsys.readouterr().out
     monkeypatch.setenv("HVA_REMOTE_BACKEND", "reference-audio-v1")
     assert main([], serve=serve, load=load) == 2
+    monkeypatch.delenv("HVA_GATEWAY_TOKEN", raising=False)
+    assert main(["--backend", "moshi"], serve=serve, load=load) == 2
 
 
 def test_one_tls_connection_carries_one_turn(tmp_path: Path) -> None:

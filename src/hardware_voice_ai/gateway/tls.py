@@ -11,17 +11,30 @@ import ssl
 
 from hardware_voice_ai.errors import ConfigurationError
 from hardware_voice_ai.gateway.settings import GatewaySettings
-from hardware_voice_ai.gateway.turn import TurnGateway
+from hardware_voice_ai.gateway.turn import READ_TIMEOUT_S, TurnGateway
 
 
 class SocketStream:
-    """Byte stream over one accepted socket."""
+    """Byte stream over one accepted socket.
 
-    def __init__(self, sock: socket.socket) -> None:
+    ``read`` raises ``TimeoutError`` when the socket wait expires. A closed
+    peer returns ``b""``.
+    """
+
+    def __init__(self, sock: socket.socket, timeout_s: float = READ_TIMEOUT_S) -> None:
         self._sock = sock
+        self.set_timeout(timeout_s)
+
+    def set_timeout(self, timeout_s: float) -> None:
+        self._timeout_s = timeout_s
+        self._sock.settimeout(timeout_s)
 
     def read(self, n: int) -> bytes:
-        return self._sock.recv(n)
+        self._sock.settimeout(self._timeout_s)
+        try:
+            return self._sock.recv(n)
+        except socket.timeout as exc:
+            raise TimeoutError from exc
 
     def write(self, data: bytes) -> None:
         self._sock.sendall(data)
@@ -53,7 +66,13 @@ def load_server_context(certfile: str, keyfile: str) -> ssl.SSLContext:
 
 
 def serve(settings: GatewaySettings, backend) -> None:
-    """Listen until the process is interrupted. One connection, one turn."""
+    """Listen until the process is interrupted.
+
+    One accepted connection is handled to completion before the next accept.
+    A second client waits in the listen backlog; it is not yet a turn, so it
+    does not receive an ``unavailable`` frame. The accepted socket is given a
+    read timeout before the TLS handshake so a stall cannot sit forever.
+    """
     context = load_server_context(settings.certfile, settings.keyfile)
     gateway = TurnGateway(settings, backend)
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
@@ -62,9 +81,10 @@ def serve(settings: GatewaySettings, backend) -> None:
         server.listen(1)
         while True:
             conn, _addr = server.accept()
+            conn.settimeout(READ_TIMEOUT_S)
             try:
                 tls_conn = context.wrap_socket(conn, server_side=True)
-            except ssl.SSLError:
+            except (ssl.SSLError, socket.timeout, TimeoutError, OSError):
                 conn.close()
                 continue
             try:

@@ -49,7 +49,7 @@ def main(argv: list[str] | None = None, *, serve=None, load=None) -> int:
     print(
         f"gateway backend={settings.backend_id} "
         f"listen={settings.host}:{settings.port} "
-        f"token={'set' if settings.token else 'unset'}",
+        f"token=set",
         flush=True,
     )
     try:

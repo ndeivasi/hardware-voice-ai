@@ -20,8 +20,9 @@ DEFAULT_QWEN_SPEAKER = "Ethan"
 class GatewaySettings:
     """How this GPU process serves one remote backend.
 
-    ``token`` is the device credential, shared with ``HVA_GATEWAY_TOKEN`` on
-    the device. It is not a model-vendor key. ``repr`` does not include it.
+    ``token`` is the operator-chosen secret a device must send as
+    ``authorization``. It is not a model-vendor key. An empty token is
+    rejected. ``repr`` does not include the secret.
     """
 
     backend_id: str = DEFAULT_REMOTE_BACKEND
@@ -41,7 +42,13 @@ class GatewaySettings:
         object.__setattr__(self, "backend_id", parse_remote_backend(self.backend_id))
         if not isinstance(self.token, str) or "\n" in self.token or "\r" in self.token:
             raise ConfigurationError("gateway token must be a single line.")
-        object.__setattr__(self, "token", self.token.strip())
+        token = self.token.strip()
+        if not token:
+            raise ConfigurationError(
+                "Set HVA_GATEWAY_TOKEN. The gateway does not start without "
+                "an operator-chosen secret."
+            )
+        object.__setattr__(self, "token", token)
         host = self.host.strip()
         if not host or any(mark in host for mark in ("/", ":", "?", "#", "@")):
             raise ConfigurationError("gateway host must be a hostname or address.")
