@@ -72,7 +72,8 @@ class SessionOrchestrator:
 
         Hardware mute refuses the wake. A wake during capture is ignored.
         A wake during speaking stops playback, then accepts the new turn.
-        An accepted wake plays the local wake cue.
+        An accepted wake plays the local wake cue. The runtime keeps that
+        cue out of the capture tap and ignores a further wake while it plays.
         """
         if not self._cut_playback_for_wake():
             return False

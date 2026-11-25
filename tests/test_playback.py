@@ -2,7 +2,9 @@
 
 import socket
 import sys
+import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -13,6 +15,8 @@ from hardware_voice_ai.audio.source import PcmAudioSource
 from hardware_voice_ai.config import DeviceConfig
 from hardware_voice_ai.errors import AudioBackendError, ConfigurationError
 from hardware_voice_ai.playback.constants import STOP_LATENCY_BUDGET_MS
+from hardware_voice_ai.capture.utterance import UtteranceCapture
+from hardware_voice_ai.capture.handoff import QueueUtteranceSink
 from hardware_voice_ai.playback.cues import Cue, render_cue
 from hardware_voice_ai.playback.player import (
     PlaybackStatus,
@@ -32,7 +36,7 @@ from hardware_voice_ai.session.orchestrator import SessionOrchestrator
 from hardware_voice_ai.session.state import DeviceState, IllegalTransitionError
 from hardware_voice_ai.wake.events import WakeEvent
 from hardware_voice_ai.wake.reference import default_template, render_pattern
-from tests.support import RecordingCapture, silence
+from tests.support import MemoryLog, RecordingCapture, ScriptedModel, silence
 
 
 def _fmt(channels: int = 1) -> AudioFormat:
@@ -547,6 +551,217 @@ def test_sounddevice_speaker_uses_a_short_callback_queue(monkeypatch) -> None:
     speaker.close()
     assert fake.stream.stopped is True
     assert fake.stream.closed is True
+
+
+class _FakeOutput:
+    """PortAudio stand-in. It does not run a callback thread."""
+
+    def __init__(self) -> None:
+        self.stream: _FakeOutputStream | None = None
+
+    def OutputStream(self, **kwargs):
+        self.stream = _FakeOutputStream(**kwargs)
+        return self.stream
+
+
+class _FakeOutputStream:
+    def __init__(self, **kwargs) -> None:
+        self.kwargs = kwargs
+        self.started = False
+        self.stopped = False
+        self.closed = False
+
+    def start(self) -> None:
+        self.started = True
+
+    def stop(self) -> None:
+        self.stopped = True
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _live_speaker(monkeypatch, queue_ms: int = 200) -> tuple[SoundDeviceSpeaker, object]:
+    fake = _FakeOutput()
+    monkeypatch.setitem(sys.modules, "sounddevice", fake)
+    speaker = SoundDeviceSpeaker(_fmt(), queue_ms=queue_ms)
+    assert fake.stream is not None
+    return speaker, fake.stream.kwargs["callback"]
+
+
+def test_live_flush_waits_until_the_callback_drains(monkeypatch) -> None:
+    speaker, callback = _live_speaker(monkeypatch)
+    block = np.full((320, 1), 0.5, dtype=np.float32)
+    speaker.write(block)
+    assert speaker.queued_samples == 320
+    finished = threading.Event()
+
+    def drain() -> None:
+        speaker.flush()
+        finished.set()
+
+    thread = threading.Thread(target=drain)
+    thread.start()
+    time.sleep(0.05)
+    assert finished.is_set() is False
+    assert speaker.queued_samples == 320
+    out = np.zeros((320, 1), dtype=np.float32)
+    callback(out, 320, None, None)
+    thread.join(timeout=1.0)
+    assert finished.is_set() is True
+    assert speaker.queued_samples == 0
+    assert speaker.played_samples == 320
+    assert np.allclose(out, 0.5)
+    speaker.close()
+
+
+def test_stop_during_live_flush_drops_the_tail(monkeypatch) -> None:
+    speaker, _callback = _live_speaker(monkeypatch)
+    playback = SpeakerPlayback(speaker)
+    audio = np.full(320, 0.4, dtype=np.float32)
+    playback.play_reply(MemoryReplyAudio(audio, sample_rate_hz=16_000, channels=1))
+    _wait_until(
+        lambda: speaker.queued_samples == 320 and playback.is_playing,
+        "live playback completed before the queue was quiet",
+    )
+    result = playback.stop()
+    assert result.status is PlaybackStatus.STOPPED
+    assert result.reason is PlaybackStopReason.STOP
+    assert result.status is not PlaybackStatus.COMPLETED
+    assert speaker.queued_samples == 0
+    assert speaker.played_samples == 0
+    assert result.samples_dropped == 320
+    playback.close()
+
+
+def test_mute_during_live_flush_drops_the_tail(monkeypatch) -> None:
+    speaker, _callback = _live_speaker(monkeypatch)
+    playback = SpeakerPlayback(speaker)
+    session = SessionOrchestrator(RecordingCapture(), playback=playback)
+    session.on_wake_accepted(_event(), _snapshot())
+    _wait_until(
+        lambda: speaker.queued_samples > 0 and playback.is_cue_playing,
+        "wake cue was not held in the live queue",
+    )
+    session.apply_mute(True)
+    assert session.is_muted is True
+    assert playback.status().status is PlaybackStatus.STOPPED
+    assert playback.status().reason is PlaybackStopReason.MUTE
+    assert speaker.queued_samples == 0
+    assert speaker.played_samples == 0
+    playback.close()
+
+
+def test_live_flush_completes_after_the_callback_drains(monkeypatch) -> None:
+    speaker, callback = _live_speaker(monkeypatch)
+    playback = SpeakerPlayback(speaker)
+    audio = np.full(320, 0.4, dtype=np.float32)
+    playback.play_reply(MemoryReplyAudio(audio, sample_rate_hz=16_000, channels=1))
+    _wait_until(
+        lambda: speaker.queued_samples == 320 and playback.is_playing,
+        "reply was marked complete while still queued",
+    )
+    out = np.zeros((320, 1), dtype=np.float32)
+    callback(out, 320, None, None)
+    result = playback.wait()
+    assert result.status is PlaybackStatus.COMPLETED
+    assert speaker.played_samples == 320
+    assert speaker.queued_samples == 0
+    assert np.allclose(out[:, 0], audio)
+    playback.close()
+
+
+def _wake_scores() -> list[float]:
+    return [0.9] * 6 + [0.0] * 12
+
+
+def _cue_runtime(monkeypatch, samples: np.ndarray, scores: list[float], capture):
+    speaker, callback = _live_speaker(monkeypatch, queue_ms=80)
+    playback = SpeakerPlayback(speaker)
+    config = replace(
+        DeviceConfig(),
+        accept_threshold=0.6,
+        min_positive_ms=120,
+        confirm_ms=240,
+        cooldown_ms=0,
+        max_word_ms=1000,
+        end_ratio=0.85,
+    )
+    log = MemoryLog()
+    runtime = WakeRuntime(
+        config,
+        PcmAudioSource(samples, config.audio_format),
+        model=ScriptedModel(scores=scores),
+        capture=capture,
+        detection_log=log,
+        playback=playback,
+    )
+    return runtime, playback, callback, log
+
+
+def _release_cue(playback: SpeakerPlayback, callback) -> None:
+    out = np.zeros((320, 1), dtype=np.float32)
+    for _ in range(40):
+        if not playback.is_playing and playback.speaker.queued_samples == 0:
+            break
+        callback(out, 320, None, None)
+        time.sleep(0.001)
+    playback.wait()
+
+
+def test_wake_cue_is_not_in_the_captured_utterance(monkeypatch) -> None:
+    wake = _wake_scores()
+    during = 8
+    after = 4
+    trailing = 40
+    scores = wake + [0.0] * (during + after + trailing)
+    tone = np.full(320, 0.8, dtype=np.float32)
+    quiet = np.zeros(320, dtype=np.float32)
+    samples = np.concatenate(
+        [quiet] * len(wake) + [tone] * during + [tone] * after + [quiet] * trailing
+    )
+    sink = QueueUtteranceSink()
+    capture = UtteranceCapture(sink)
+    runtime, playback, callback, _log = _cue_runtime(monkeypatch, samples, scores, capture)
+    while runtime.orchestrator.state is not DeviceState.CAPTURING:
+        assert runtime.poll()
+    assert playback.is_cue_playing is True
+    for _ in range(during):
+        assert runtime.poll()
+    assert len(capture._frames) == during
+    for frame in capture._frames:
+        assert float(np.max(np.abs(frame))) == 0.0
+    _release_cue(playback, callback)
+    assert playback.is_cue_playing is False
+    while runtime.poll():
+        pass
+    utterance = sink.take()
+    assert utterance is not None
+    loud = np.count_nonzero(np.abs(utterance.samples[:, 0]) > 0.5)
+    assert loud == after * 320
+    runtime.close()
+
+
+def test_wake_during_a_local_cue_is_ignored(monkeypatch) -> None:
+    one = _wake_scores()
+    scores = one + one
+    samples = np.zeros(320 * len(scores), dtype=np.float32)
+    capture = RecordingCapture()
+    runtime, playback, callback, log = _cue_runtime(monkeypatch, samples, scores, capture)
+    runtime.orchestrator.play_cue(Cue.OFFLINE)
+    assert playback.is_cue_playing is True
+    for _ in range(len(one)):
+        assert runtime.poll()
+    assert capture.requests == []
+    assert runtime.orchestrator.state is DeviceState.IDLE
+    assert [accepted for _event, accepted, _model in log.records] == [False]
+    _release_cue(playback, callback)
+    while runtime.poll():
+        pass
+    assert len(capture.requests) == 1
+    assert runtime.orchestrator.state is DeviceState.CAPTURING
+    assert [accepted for _event, accepted, _model in log.records] == [False, True]
+    runtime.close()
 
 
 def test_help_lists_volume(capsys) -> None:

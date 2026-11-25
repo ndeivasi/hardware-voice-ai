@@ -8,6 +8,9 @@ to capture. The loop does not open a socket.
 
 import threading
 
+import numpy as np
+
+from hardware_voice_ai.audio.frame import AudioFrame
 from hardware_voice_ai.audio.ring_buffer import PreRollBuffer
 from hardware_voice_ai.audio.source import AudioSource
 from hardware_voice_ai.capture.handoff import QueueUtteranceSink
@@ -114,18 +117,29 @@ class WakeRuntime:
         with self._lock:
             if self.mute.is_muted() or self.orchestrator.is_muted:
                 return
-            self.buffer.write(frame)
+            # A local cue is tones. Do not score it and do not put it in the
+            # utterance. The mic still hears the room; this tap does not keep
+            # those frames. Echo cancellation during a spoken reply is later.
+            heard = _without_cue(frame) if self.playback.is_cue_playing else frame
+            self.buffer.write(heard)
             if self.orchestrator.capture_is_active:
                 try:
-                    self.capture.on_frame(frame)
+                    self.capture.on_frame(heard)
                 except Exception:
                     # on_frame failed (a frame index or format mismatch).
                     # Cancel drops the utterance, records the failed capture
                     # on the capture log, and returns the session to idle.
                     # Keep reading the microphone.
                     self.orchestrator.cancel()
-            event = self.engine.process(frame)
+            event = self.engine.process(heard)
             if event is None:
+                return
+            if self.playback.is_cue_playing:
+                self.log.record(
+                    event,
+                    accepted=False,
+                    audio_model=self.orchestrator.audio_model,
+                )
                 return
             try:
                 accepted = self.orchestrator.on_wake_accepted(
@@ -148,3 +162,12 @@ class WakeRuntime:
             if muted:
                 self.buffer.clear()
                 self.engine.reset()
+
+
+def _without_cue(frame: AudioFrame) -> AudioFrame:
+    """Same index and format as ``frame``, with silence in place of the cue."""
+    return AudioFrame(
+        samples=np.zeros_like(frame.samples),
+        format=frame.format,
+        sample_index=frame.sample_index,
+    )

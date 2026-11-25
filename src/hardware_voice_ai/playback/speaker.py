@@ -263,6 +263,7 @@ class SoundDeviceSpeaker:
         self._played = 0
         self._dropped = 0
         self._closed = False
+        self._flush_epoch = 0
         self._cv = threading.Condition()
         self._stream = sd.OutputStream(
             samplerate=fmt.sample_rate_hz,
@@ -303,17 +304,28 @@ class SoundDeviceSpeaker:
             dropped = len(self._pending)
             self._dropped += dropped
             self._pending = np.zeros((0, self.format.channels), dtype=np.float32)
+            self._flush_epoch += 1
             self._cv.notify_all()
             return dropped
 
     def flush(self) -> None:
-        """Let the callback play the queue out. Stop is what discards it."""
-        return None
+        """Block until the callback has played the queue, or stop/close aborts it.
+
+        ``drop_queued`` and ``close`` wake this wait. Playback stays in
+        progress until ``flush`` returns, so mute and stop can still discard
+        the tail. A no-op return would mark the sound complete while audio
+        is sitting in ``_pending``.
+        """
+        with self._cv:
+            epoch = self._flush_epoch
+            while len(self._pending) > 0 and not self._closed and self._flush_epoch == epoch:
+                self._cv.wait(timeout=0.05)
 
     def close(self) -> None:
         with self._cv:
             self._closed = True
             self._pending = np.zeros((0, self.format.channels), dtype=np.float32)
+            self._flush_epoch += 1
             self._cv.notify_all()
         self._stream.stop()
         self._stream.close()

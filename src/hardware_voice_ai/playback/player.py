@@ -82,6 +82,7 @@ class SpeakerPlayback:
         self._error: BaseException | None = None
         self._played_base = 0
         self._dropped_base = 0
+        self._cue = False
         self._result = PlaybackResult(
             status=PlaybackStatus.IDLE,
             reason=PlaybackStopReason.NONE,
@@ -93,6 +94,16 @@ class SpeakerPlayback:
     def is_playing(self) -> bool:
         with self._lock:
             return self._status is PlaybackStatus.PLAYING
+
+    @property
+    def is_cue_playing(self) -> bool:
+        """True while a local wake, offline, or error cue is still going.
+
+        This stays true through ``flush``, until the speaker queue is quiet
+        or a stop discards it. A spoken reply does not set it.
+        """
+        with self._lock:
+            return self._status is PlaybackStatus.PLAYING and self._cue
 
     @property
     def volume(self) -> float:
@@ -113,7 +124,7 @@ class SpeakerPlayback:
         """
         self._require_source(source)
         self.stop(PlaybackStopReason.REPLACED)
-        return self._start(source, on_finished)
+        return self._start(source, on_finished, cue=False)
 
     def play_cue(self, cue: Cue) -> PlaybackResult:
         """Play one local cue. The samples are rendered here, not fetched."""
@@ -126,7 +137,7 @@ class SpeakerPlayback:
             channels=self.speaker.format.channels,
         )
         self.stop(PlaybackStopReason.REPLACED)
-        return self._start(source, None)
+        return self._start(source, None, cue=True)
 
     def set_suppressed(self, suppressed: bool) -> None:
         """Refuse new playback while hardware mute is held.
@@ -204,12 +215,15 @@ class SpeakerPlayback:
         self,
         source: ReplyAudio,
         on_finished: FinishedCallback | None,
+        *,
+        cue: bool,
     ) -> PlaybackResult:
         with self._lock:
             if self._suppressed:
                 return muted_result()
             self._stop.clear()
             self._error = None
+            self._cue = cue
             self._source = source
             self._on_finished = on_finished
             self._played_base = self.speaker.played_samples
@@ -245,6 +259,13 @@ class SpeakerPlayback:
                 self.speaker.write(gained)
         except Exception as exc:
             error = exc
+        # Flush outside the player lock. Stop and mute must still be able to
+        # drop the queue while this wait runs, and status stays PLAYING until
+        # the speaker is quiet or the tail is discarded.
+        if error is not None or self._stop.is_set():
+            self.speaker.drop_queued()
+        else:
+            self.speaker.flush()
         callback: FinishedCallback | None = None
         result: PlaybackResult
         with self._lock:
@@ -258,7 +279,6 @@ class SpeakerPlayback:
                     )
                     self._mark(PlaybackStatus.STOPPED, reason)
                 else:
-                    self.speaker.flush()
                     self._mark(PlaybackStatus.COMPLETED, PlaybackStopReason.COMPLETED)
             result = self._result
             finished = self._on_finished
