@@ -8,6 +8,60 @@ This is the approved project baseline, approved by Nir Miya on 25 Nov 2026 at 1:
 
 Implementation remains blocked. Issues #1–#9 stay on `status:blocked` until Nir explicitly unlocks them.
 
+### High-level design
+
+This is the primary view of the approved hybrid baseline. On-device stages are wake-word detection, microphone capture, and speaker output. Cloud stages are speech-to-text, the language model, and text-to-speech. Those cloud stages are reached only through the gateway, on a per-turn TLS session that opens after an accepted wake.
+
+```mermaid
+flowchart TB
+  subgraph device["Physical device"]
+    direction TB
+    mute["Hardware mute<br/>authoritative physical control<br/>can return the device to idle"]
+    mic["Microphone"]
+    wake["Wake-word detection<br/>on-device only, always on"]
+    cap["Microphone capture with pre-roll<br/>on-device only<br/>starts on wake; raw audio stays local"]
+    orch["Session orchestrator<br/>on-device"]
+    cues["Local cues<br/>wake acknowledgment, offline, or error<br/>no network"]
+    spk["Speaker output<br/>on-device only<br/>playback, barge-in, immediate stop"]
+    mute -.->|"cuts listening"| mic
+    mute -.->|"return to idle"| orch
+    mic --> wake
+    mic --> cap
+    wake -->|"wake accepted"| orch
+    cap -->|"utterance, including pre-roll"| orch
+    orch -->|"local cue"| cues
+    cues --> spk
+    orch -->|"playback, barge-in, immediate stop"| spk
+  end
+
+  session["Authenticated TLS streaming session<br/>WebSocket or equivalent RPC<br/>one session per turn<br/>opens only after an accepted wake<br/>no always-on audio socket<br/>to cloud: audio frames and cancel<br/>back: partial and final transcript, TTS audio, errors"]
+
+  subgraph cloud["Cloud"]
+    direction TB
+    gw["Cloud gateway<br/>thin adapters for STT, LLM, and TTS<br/>device does not hard-code vendors<br/>TTS audio returns through this gateway"]
+    stt["Speech-to-text<br/>cloud, streaming, swappable<br/>later on-device STT uses the same contract"]
+    llm["Language model API call<br/>cloud, streaming"]
+    tts["Text-to-speech<br/>cloud, streaming, swappable<br/>later on-device TTS uses the same contract"]
+    gw --> stt
+    stt -->|"transcript"| llm
+    llm -->|"reply text"| tts
+  end
+
+  orch <-->|"this turn only"| session
+  session <--> gw
+
+  classDef onDevice fill:#e8f5e9,stroke:#1b5e20,color:#10240f
+  classDef cloud fill:#e3f2fd,stroke:#0d47a1,color:#0a1929
+  classDef link fill:#fff8e1,stroke:#e65100,color:#3e2723
+  classDef control fill:#fce4ec,stroke:#880e4f,color:#311018
+  class mic,wake,cap,orch,cues,spk onDevice
+  class gw,stt,llm,tts cloud
+  class session link
+  class mute control
+```
+
+Green nodes stay on the device. Blue nodes are the cloud adapters. The session between them is the only path off the device.
+
 ### Assumptions
 
 - Specific hardware is not chosen yet. Design for a Linux-class single-board computer (Raspberry Pi-class or similar) with at least one microphone and a speaker, and keep audio, model, and transport interfaces swappable when a board is picked.
@@ -17,6 +71,8 @@ Implementation remains blocked. Issues #1–#9 stay on `status:blocked` until Ni
 - Product needs already raised by the User advocate (not yet formal acceptance criteria): hear the user the first time from across the room without triggering on TV or other talk; after wake, catch the request even if speech starts immediately; stop listening when the user is done; speak back what it heard if it may have misheard, so correction can be spoken; keep spoken answers short; stop immediately on request; never send a message, buy something, or take an irreversible action without confirmation; provide a clear way to turn the microphone off completely.
 
 ### System topology
+
+The mermaid diagram above is the primary high-level view. The sketch below is the same topology in the original source layout.
 
 ```
 [mics] -> capture/pre-roll buffer -> wake-word engine (on-device, always on)
