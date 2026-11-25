@@ -218,6 +218,24 @@ def test_settings_hide_the_token_and_reject_a_url_host() -> None:
         GatewaySettings(token="one\ntwo")
 
 
+def test_landed_device_session_is_accepted_by_the_gateway() -> None:
+    """The voice-loop client and this gateway are the two ends of one session."""
+    from hardware_voice_ai.audio_model.session import BufferStream, FramedGatewaySession
+
+    client = BufferStream()
+    session = FramedGatewaySession(client, token=TOKEN)
+    session.start_turn(sample_rate_hz=16_000, channels=1)
+    session.send_audio(_pcm(320))
+    session.finish_audio()
+    backend = Scripted([SpokenChunk(_pcm(320, value=0.2), 16_000)])
+    stream = _open(bytes(client.outgoing))
+    serve_turn(stream, backend, _settings())
+    assert backend.seen[0][0].shape == (320, 1)
+    messages = _texts(bytes(stream.outgoing))
+    assert [item["type"] for item in messages] == ["reply_start", "end"]
+    assert TOKEN.encode() not in bytes(stream.outgoing)
+
+
 def test_text_and_audio_frames_match_the_device_session() -> None:
     hello = {"type": "hello", "audio_model": "remote", "authorization": "device-token"}
     frame = encode_text(hello)

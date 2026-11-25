@@ -22,7 +22,7 @@ One gateway process loads one model at startup. A hello may include `"backend"`.
 
 ## Run the gateway on a GPU host
 
-Run this process on the machine that has the GPU. The board and the GPU host are not the same machine. This package is the server. `DeviceConfig` on main has no gateway URL and does not dial this session.
+Run this process on the machine that has the GPU. The board and the GPU host are not the same machine. This process is the server. The device voice loop is the client: after an accepted wake it opens one session to `HVA_GATEWAY_URL` and closes it at the end of the turn.
 
 On the GPU host, create a TLS certificate and a non-empty token yourself. The process refuses to start when `HVA_GATEWAY_TOKEN` is empty. This repository does not generate a certificate or a token, and it does not contain a vendor API key. The token is the device credential. It is not sent to Moshi, MiniCPM-o, or Qwen. A hello with a missing or empty `authorization` is rejected.
 
@@ -38,7 +38,16 @@ python -m hardware_voice_ai.gateway --host 0.0.0.0 --port 8443
 
 `--backend` overrides `HVA_REMOTE_BACKEND`. The other extras are `.[minicpm]` and `.[qwen]`. Versions for `moshi`, `torch`, and `transformers` are pinned in `pyproject.toml`.
 
-A device client, when one is added, should open one TLS session per turn after wake and close it at the end of that turn. There is no always-on audio socket. The URL it should use is `tls://<gpu-host>:8443`, with the same token. `0.0.0.0` is only the bind address. Do not put the token in the URL. The wake loop does not import the gateway.
+On the device, set the same non-empty token and the gateway address. There is no always-on audio socket. The wake loop does not import the gateway; the voice loop opens the session only for that turn.
+
+```bash
+# Device
+export HVA_AUDIO_MODEL=remote
+export HVA_GATEWAY_URL=tls://gpu-host.example:8443
+export HVA_GATEWAY_TOKEN='operator-chosen-secret'
+```
+
+`0.0.0.0` is only the bind address. Do not put the token in the URL. If the device token is empty, its hello omits `authorization` and this gateway rejects the turn.
 
 ## What the session carries
 

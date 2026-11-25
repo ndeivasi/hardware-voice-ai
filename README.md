@@ -35,4 +35,4 @@ pip install -e '.[moshi]'
 python -m hardware_voice_ai.gateway --backend moshi
 ```
 
-`--backend` is `moshi` (default), `minicpm-o-4.5`, or `qwen3-omni`. `HVA_GATEWAY_TOKEN` is required. This process does not dial out from the device; `DeviceConfig` has no gateway URL. A later device client should use `tls://<gpu-host>:8443` and the same token. Certificates are the operator's. This repo does not create them. Details are in [docs/remote-backends.md](docs/remote-backends.md).
+`--backend` is `moshi` (default), `minicpm-o-4.5`, or `qwen3-omni`. `HVA_GATEWAY_TOKEN` is required on the gateway. The device voice loop opens one session per turn when `HVA_GATEWAY_URL=tls://<gpu-host>:8443` and sends the same token. Certificates are the operator's. This repo does not create them. Details are in [docs/remote-backends.md](docs/remote-backends.md).

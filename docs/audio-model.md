@@ -58,7 +58,7 @@ The turn stays on the device. No gateway session is opened and the TLS module is
 
 Default. After `submit_utterance`, the device opens one authenticated TLS session and streams that utterance. There is no always-on socket. The wake loop does not open one. If `HVA_GATEWAY_URL` is empty, the model is unavailable, a local offline cue plays, and listening continues.
 
-The device does not name a vendor. The gateway holds provider adapters. The device speaks one framed RPC:
+The device does not name a vendor. The gateway holds the adapters: Moshi (default), MiniCPM-o 4.5, and Qwen3-Omni Instruct. See [remote-backends.md](remote-backends.md). That gateway refuses to start without `HVA_GATEWAY_TOKEN`, so a turn that should reach an adapter sets the same non-empty token here. The device speaks one framed RPC:
 
 ```
 uint32 big-endian payload length | uint8 type | payload

@@ -219,7 +219,7 @@ When Audio Model is `remote`, the gateway runs one open-weight speech-to-speech 
 
 The local stand-in stays `reference-audio-v1`. It is not one of these adapters.
 
-The design is still one authenticated TLS session per turn after an accepted wake. This package is the server for that session. The device package on main does not dial it: `DeviceConfig` has no gateway URL. A later device client should use `tls://<gpu-host>:<port>` and the same non-empty `HVA_GATEWAY_TOKEN`. The gateway refuses to start without that secret. It is not a model-vendor key. The repository does not ship a certificate, a key, or a token. The GPU host is a separate machine. A Pi-class board runs wake, capture, and playback, and does not load these models.
+The design is still one authenticated TLS session per turn after an accepted wake. The device voice loop opens that session when `HVA_GATEWAY_URL` is `tls://<gpu-host>:<port>`. This gateway is the server. It refuses to start without a non-empty `HVA_GATEWAY_TOKEN`, and the device sends that same secret as `authorization`. It is not a model-vendor key. The repository does not ship a certificate, a key, or a token. The GPU host is a separate machine. A Pi-class board runs wake, capture, playback, and the voice-loop client. It does not load these models.
 
 The gateway is what holds the vendor calls. Replacing how Moshi, MiniCPM-o, or Qwen3-Omni is constructed does not change the device session. Setup for the GPU host is [remote-backends.md](remote-backends.md).
 
