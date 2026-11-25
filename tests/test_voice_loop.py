@@ -18,7 +18,8 @@ from hardware_voice_ai.capture.port import CaptureRequest
 from hardware_voice_ai.config import DeviceConfig
 from hardware_voice_ai.errors import ModelUnavailable
 from hardware_voice_ai.mute.control import InMemoryMuteControl
-from hardware_voice_ai.playback.player import PlaybackStopReason, SpeakerPlayback
+from hardware_voice_ai.playback.player import PlaybackStatus, PlaybackStopReason, SpeakerPlayback
+from hardware_voice_ai.playback.speaker import MemorySpeaker as PlaybackMemorySpeaker
 from hardware_voice_ai.playback.speaker import SoundDeviceSpeaker
 from hardware_voice_ai.runtime import WakeRuntime
 from hardware_voice_ai.session.audio_model import AudioModel
@@ -76,6 +77,15 @@ def _utterance(
         wake_word_end_offset=160,
         endpoint="handed_off",
     )
+
+
+def _wait_idle(session) -> None:
+    """``submit_utterance`` can return while speaker flush is still running."""
+    deadline = time.monotonic() + 2.0
+    while session.state is not DeviceState.IDLE:
+        if time.monotonic() > deadline:
+            raise AssertionError("session did not return to idle after playback flush")
+        time.sleep(0.001)
 
 
 def _ready(voice, model: AudioModel):
@@ -160,6 +170,7 @@ def test_local_model_speaks_a_reply_and_walks_the_states() -> None:
     first = session.submit_utterance(_utterance())
     assert first.outcome is TurnOutcome.SPOKEN
     assert first.cue is None
+    _wait_idle(session)
     assert session.state is DeviceState.IDLE
     assert session.trace == [
         DeviceState.IDLE,
@@ -203,6 +214,7 @@ def test_local_silence_is_low_confidence_and_the_next_wake_works() -> None:
     assert result.reply_sample_count == 0
     assert voice.speaker.reply_audio().shape[0] == 0
     assert voice.speaker.cues[0][0] == "error"
+    _wait_idle(session)
     assert session.state is DeviceState.IDLE
     assert session.on_wake_accepted(_event(), _snapshot()) is True
 
@@ -225,6 +237,7 @@ def test_unavailable_local_model_stays_on_device_and_listening_recovers() -> Non
     assert result.message == "local audio model is unavailable"
     assert result.cue == "error"
     assert voice.speaker.cues[0][0] == "error"
+    _wait_idle(session)
     assert session.state is DeviceState.IDLE
     assert session.on_wake_accepted(_event(), _snapshot()) is True
 
@@ -244,6 +257,7 @@ def test_local_timeout_plays_an_error_cue() -> None:
     result = session.submit_utterance(_utterance())
     assert result.outcome is TurnOutcome.TIMEOUT
     assert result.cue == "error"
+    _wait_idle(session)
     assert session.state is DeviceState.IDLE
 
 
@@ -261,6 +275,7 @@ def test_raising_model_does_not_stick_the_session_or_leak_the_exception() -> Non
     assert result.message == "audio model failed"
     assert "test-token" not in result.message
     assert "boom" not in result.message
+    _wait_idle(session)
     assert session.state is DeviceState.IDLE
     assert session.on_wake_accepted(_event(), _snapshot()) is True
 
@@ -286,6 +301,7 @@ def test_remote_reply_is_audio() -> None:
     played = voice.speaker.reply_audio()
     assert np.allclose(played, reply)
     assert voice.speaker.cues == []
+    _wait_idle(session)
     assert session.trace[-3:] == [
         DeviceState.CAPTURING,
         DeviceState.SPEAKING,
@@ -337,6 +353,7 @@ def test_remote_without_a_gateway_is_offline_and_wake_still_works() -> None:
     assert result.message == "remote audio model is unavailable"
     assert voice.speaker.cues[0][0] == "offline"
     assert "hardware_voice_ai.audio_model.tls" not in sys.modules
+    _wait_idle(session)
     assert session.state is DeviceState.IDLE
     assert session.on_wake_accepted(_event(), _snapshot()) is True
 
@@ -351,6 +368,7 @@ def test_remote_timeout_plays_the_offline_cue() -> None:
     assert result.cue == "offline"
     assert scripted.cancels == 1
     assert scripted.closed is True
+    _wait_idle(session)
     assert session.state is DeviceState.IDLE
 
 
@@ -387,6 +405,7 @@ def test_cancel_stops_the_reply_without_a_cue() -> None:
     assert voice.speaker.stops >= 1
     assert scripted.cancels == 1
     assert len(scripted.sent) == 1
+    _wait_idle(session)
     assert session.state is DeviceState.IDLE
     assert session.on_wake_accepted(_event(), _snapshot()) is True
 
@@ -456,6 +475,7 @@ def test_submit_refuses_a_bad_utterance_without_calling_the_model() -> None:
     assert mismatch.outcome is TurnOutcome.ERROR
     assert mismatch.message == "utterance does not match the Audio Model setting"
     assert called == []
+    _wait_idle(session)
     assert session.state is DeviceState.IDLE
 
     session.on_wake_accepted(_event(), _snapshot())
@@ -506,6 +526,7 @@ def test_opener_failure_is_unavailable_without_the_token() -> None:
     assert result.outcome is TurnOutcome.UNAVAILABLE
     assert result.message == "remote audio model is unavailable"
     assert TOKEN not in result.message
+    _wait_idle(session)
     assert session.state is DeviceState.IDLE
 
 
@@ -534,6 +555,7 @@ def test_always_on_audio_does_not_open_a_gateway_session() -> None:
     result = runtime.orchestrator.submit_utterance(_utterance(AudioModel.REMOTE))
     assert opened == ["opened"]
     assert result.outcome is TurnOutcome.UNAVAILABLE
+    _wait_idle(runtime.orchestrator)
     assert runtime.orchestrator.state is DeviceState.IDLE
     runtime.close()
 
@@ -725,6 +747,43 @@ def _reach_flush_tail(runtime, speaker, playback, callback) -> None:
     raise AssertionError("playback did not stop in flush with a queued tail")
 
 
+def test_memory_speaker_flush_idles_through_the_finished_callback() -> None:
+    """In-memory playback, including the default speaker, idles from the reply callback.
+
+    ``SpeakerPlayback`` around ``MemorySpeaker`` and the runtime's default
+    ``NullSpeaker`` both finish ``flush`` on the playback thread.
+    ``_on_reply_finished`` is what records that completion and leaves ``speaking``.
+    """
+    config = DeviceConfig(audio_model="local")
+    word = render_pattern(default_template())
+    samples = np.concatenate((silence(1600), word, silence(32_000)))
+    for playback in (
+        SpeakerPlayback(PlaybackMemorySpeaker(config.audio_format), volume=config.volume),
+        None,
+    ):
+        runtime = WakeRuntime(
+            config,
+            PcmAudioSource(samples, config.audio_format),
+            playback=playback,
+        )
+        try:
+            runtime.run()
+            runtime.wait_for_turns()
+            _wait_until(
+                lambda runtime=runtime: (
+                    runtime.orchestrator.state is DeviceState.IDLE
+                    and runtime.orchestrator.last_reply_result is not None
+                    and runtime.orchestrator.last_reply_result.status
+                    is PlaybackStatus.COMPLETED
+                    and runtime.orchestrator.last_reply_result.reason
+                    is PlaybackStopReason.COMPLETED
+                ),
+                "in-memory flush did not finish through the reply callback",
+            )
+        finally:
+            runtime.close()
+
+
 def test_wake_during_flush_tail_stops_playback_and_session_stays_speaking(monkeypatch) -> None:
     """Speaking lasts through speaker flush, and a wake in that tail cuts it.
 
@@ -744,10 +803,16 @@ def test_wake_during_flush_tail_stops_playback_and_session_stays_speaking(monkey
         while speaker.queued_samples > 0:
             _drain(callback)
         _wait_until(
-            lambda: runtime.orchestrator.state is DeviceState.IDLE and not playback.is_playing,
-            "session left speaking before flush finished, or never returned to idle",
+            lambda: (
+                runtime.orchestrator.state is DeviceState.IDLE
+                and not playback.is_playing
+                and runtime.orchestrator.last_reply_result is not None
+                and runtime.orchestrator.last_reply_result.status is PlaybackStatus.COMPLETED
+            ),
+            "flush did not finish through the reply callback",
         )
         assert runtime.orchestrator.state is DeviceState.IDLE
+        assert runtime.orchestrator.last_reply_result.reason is PlaybackStopReason.COMPLETED
     finally:
         runtime.close()
 
@@ -872,7 +937,11 @@ def test_end_of_utterance_speaks_and_a_second_wake_is_accepted() -> None:
     runtime.wait_for_turns()
     # Idle follows speaker flush, which can finish just after the model thread.
     _wait_until(
-        lambda: runtime.orchestrator.state is DeviceState.IDLE,
+        lambda: (
+            runtime.orchestrator.state is DeviceState.IDLE
+            and runtime.orchestrator.last_reply_result is not None
+            and runtime.orchestrator.last_reply_result.status is PlaybackStatus.COMPLETED
+        ),
         "spoken reply did not return to idle after flush",
     )
     runtime.close()
@@ -921,4 +990,5 @@ def test_overlong_utterance_is_not_sent() -> None:
     assert result.outcome is TurnOutcome.ERROR
     assert "longer" in result.message
     assert sent == []
+    _wait_idle(session)
     assert session.state is DeviceState.IDLE
