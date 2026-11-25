@@ -3,8 +3,13 @@
 The wake path moves ``idle → woken → capturing`` and hands the pre-roll to
 capture. After capture closes, the Audio Model runs off the microphone
 thread. ``play_reply`` plays spoken-reply audio on the device speaker.
-``play_cue`` plays a local wake, offline, or error cue. Neither call opens
-a cloud session.
+``play_cue`` plays a local cue. Neither call opens a cloud session.
+
+An accepted wake plays the wake cue and no second cue. Capture end plays
+one ``thinking`` earcon. A completed spoken reply opens a 5-second
+follow-up listen while the session is ``idle``. A new wake word is not
+required in that window. Hardware mute, stop, and cancel do not play
+``follow_up_end``.
 
 A new accepted wake during speaking cancels the model turn, cuts playback,
 and starts a new capture. Hardware mute cuts playback and returns the
@@ -13,13 +18,15 @@ device to idle. Releasing mute does not resume audio.
 
 import threading
 
-from hardware_voice_ai.audio.frame import AudioFormat, AudioSnapshot
+from hardware_voice_ai.audio.frame import AudioFormat, AudioFrame, AudioSnapshot
 from hardware_voice_ai.audio_model.cues import LocalCue
 from hardware_voice_ai.audio_model.events import TurnCancel, TurnOutcome
 from hardware_voice_ai.audio_model.loop import TurnResult, VoiceLoop
 from hardware_voice_ai.audio_model.utterance import utterance_problem
+from hardware_voice_ai.capture.endpoint import EndpointConfig, channel_rms
 from hardware_voice_ai.capture.port import CapturePort, CaptureRequest, CaptureStopReason
 from hardware_voice_ai.errors import ConfigurationError
+from hardware_voice_ai.playback.constants import FOLLOW_UP_WINDOW_MS
 from hardware_voice_ai.playback.cues import Cue
 from hardware_voice_ai.playback.player import (
     PlaybackResult,
@@ -34,6 +41,11 @@ from hardware_voice_ai.session.audio_model import AudioModel
 from hardware_voice_ai.session.state import DeviceState, IllegalTransitionError, assert_transition
 from hardware_voice_ai.wake.events import WakeEvent
 
+# Same floor as capture's endpoint. Not a wake-word score, and not the
+# noise-relative multiplier: a follow-up already as loud as the pre-roll
+# must still count as speech.
+_FOLLOW_UP_SPEECH_RMS = EndpointConfig().min_speech_rms
+
 
 class SessionOrchestrator:
     """On-device session state for wake, capture, the Audio Model, and playback.
@@ -41,7 +53,8 @@ class SessionOrchestrator:
     Audio Model is stored for the turn and copied onto the capture request.
     ``local`` and ``remote`` use the same speaker path. Reply audio is
     whatever the caller streams in. When a voice loop is attached, an
-    accepted utterance is run through that one model.
+    accepted utterance is run through that one model. Local cues, including
+    ``thinking``, ``listening``, and ``follow_up_end``, stay in this process.
     """
 
     def __init__(
@@ -76,6 +89,12 @@ class SessionOrchestrator:
         self._active_turn: TurnCancel | None = None
         self._turn_id = 0
         self._run_lock = threading.Lock()
+        self._thinking_due = False
+        self._follow_up_open = False
+        self._follow_up_remaining = 0
+        self._pending_follow_up_token: int | None = None
+        self._follow_up_consumed_token: int | None = None
+        self._last_wake: WakeEvent | None = None
 
     @property
     def is_muted(self) -> bool:
@@ -93,6 +112,15 @@ class SessionOrchestrator:
         with self._lock:
             return self._forward_frames
 
+    @property
+    def follow_up_is_active(self) -> bool:
+        """True during the 5-second listen after a completed spoken reply.
+
+        The session stays ``idle``. This is not a new ``DeviceState``.
+        """
+        with self._lock:
+            return self._follow_up_open
+
     def on_wake_accepted(self, event: WakeEvent, pre_roll: AudioSnapshot) -> bool:
         """Notify the session of a wake the engine already accepted.
 
@@ -107,6 +135,10 @@ class SessionOrchestrator:
         with self._lock:
             if self._muted or self.state is not DeviceState.IDLE:
                 return False
+            # A real wake ends the follow-up. The wake cue is the only cue.
+            self._follow_up_open = False
+            self._follow_up_remaining = 0
+            self._thinking_due = False
             accepted = self._begin_capture(event, pre_roll)
         if accepted:
             self.play_cue(Cue.WAKE)
@@ -117,13 +149,16 @@ class SessionOrchestrator:
 
         The session stays in ``capturing`` so the caller can run the Audio
         Model or pass reply audio to ``play_reply``. This does not infer
-        end-of-utterance, start the model, or start playback.
+        end-of-utterance or start the model. It does play one ``thinking``
+        earcon. That cue is not a session state.
         """
         with self._lock:
             if not self._forward_frames:
                 return
             self._forward_frames = False
             self.capture.stop(CaptureStopReason.END_OF_UTTERANCE)
+            self._thinking_due = not self._muted and self.state is DeviceState.CAPTURING
+        self._play_thinking_if_due()
 
     def play_reply(self, source: ReplyAudio) -> PlaybackResult:
         """Play spoken-reply audio on the local speaker.
@@ -138,6 +173,9 @@ class SessionOrchestrator:
         with self._lock:
             if self._muted:
                 return muted_result()
+            # Reply audio is ready. Do not start thinking, and cut it if
+            # it has already claimed the speaker.
+            self._thinking_due = False
             if self.state is DeviceState.CAPTURING and self._forward_frames:
                 raise IllegalTransitionError(
                     "Reply playback starts after capture has closed."
@@ -173,11 +211,13 @@ class SessionOrchestrator:
         return result
 
     def play_cue(self, cue: Cue) -> PlaybackResult:
-        """Play a local wake, offline, or error cue.
+        """Play a local cue.
 
         Cues are rendered in-process. The Audio Model mode does not choose
         a cloud path for them. A cue during ``speaking`` stops the reply
-        and returns the session to ``idle`` before the cue starts.
+        and returns the session to ``idle`` before the cue starts. The
+        follow-up earcons use ``_play_idle_cue`` instead, so they do not
+        take that path.
         """
         with self._lock:
             if self._muted:
@@ -207,7 +247,12 @@ class SessionOrchestrator:
         self.playback.set_volume(volume)
 
     def stop_playback(self) -> PlaybackResult:
-        """Stop the current sound. A spoken reply returns the session to idle."""
+        """Stop the current sound. A spoken reply returns the session to idle.
+
+        Stopping during the follow-up window ends it with no
+        ``follow_up_end`` cue.
+        """
+        self._close_follow_up()
         with self._lock:
             leave_speaking = self.state is DeviceState.SPEAKING
             if leave_speaking:
@@ -299,6 +344,7 @@ class SessionOrchestrator:
 
     def cancel(self) -> None:
         """Return to idle. Capture and playback both stop. No cue is played."""
+        self._close_follow_up()
         with self._lock:
             if (
                 self.state is DeviceState.IDLE
@@ -333,6 +379,9 @@ class SessionOrchestrator:
             self.playback.set_suppressed(muted)
             if not muted:
                 return
+            self._follow_up_open = False
+            self._follow_up_remaining = 0
+            self._thinking_due = False
             self._forward_frames = False
             to_idle = self.state is not DeviceState.IDLE
             was_speaking = self.state is DeviceState.SPEAKING
@@ -379,6 +428,7 @@ class SessionOrchestrator:
                 return
             if self.state is not DeviceState.IDLE:
                 self._transition(DeviceState.IDLE)
+        self._open_follow_up_after_reply()
 
     def _run_voice(self, utterance, turn_id: int, cancel: TurnCancel) -> TurnResult:
         if self.voice is None:
@@ -481,15 +531,19 @@ class SessionOrchestrator:
         except Exception:
             self._transition(DeviceState.IDLE)
             raise
+        self._last_wake = event
         self._forward_frames = True
         self._transition(DeviceState.CAPTURING)
         return True
 
     def _on_reply_finished(self, token: int, result: PlaybackResult) -> None:
+        should_follow = False
         with self._lock:
             if token != self._reply_token:
                 return
             self.last_reply_result = result
+            if result.status is PlaybackStatus.COMPLETED:
+                self._pending_follow_up_token = token
             # ``_finish_turn`` clears the model token and leaves ``speaking``
             # in place while ``flush`` is still running. This callback is the
             # idle step for that tail, and only after the token is clear. A
@@ -497,11 +551,147 @@ class SessionOrchestrator:
             # does that when playback is already quiet.
             if self._active_turn is not None:
                 return
-            if (
-                result.status is PlaybackStatus.COMPLETED
-                and self.state is DeviceState.SPEAKING
-            ):
+            if result.status is not PlaybackStatus.COMPLETED:
+                return
+            if self.state is DeviceState.SPEAKING:
                 self._transition(DeviceState.IDLE)
+            should_follow = self.state is DeviceState.IDLE
+        if should_follow:
+            self._open_follow_up_after_reply()
+
+    def follow_up_hears_speech(self, frame: AudioFrame) -> bool:
+        """True when this microphone frame is speech during the follow-up window.
+
+        The threshold is the capture endpoint's ``min_speech_rms`` on the
+        loudest channel. A wake word is not required. The small slack covers
+        a constant at that level stored as float32.
+        """
+        if not self.follow_up_is_active:
+            return False
+        return channel_rms(frame.samples) + 1e-5 >= _FOLLOW_UP_SPEECH_RMS
+
+    def accept_follow_up_speech(self, pre_roll: AudioSnapshot) -> bool:
+        """Open a capture for speech in the follow-up window.
+
+        No wake cue and no ``follow_up_end``. The request reuses the previous
+        wake's word and model id so ``CaptureRequest`` stays valid. The
+        sample indexes point at this speech, not at a new wake decision.
+        ``pre_roll`` must already include the speech frame.
+        """
+        with self._lock:
+            if (
+                not self._follow_up_open
+                or self._muted
+                or self.state is not DeviceState.IDLE
+                or self._last_wake is None
+            ):
+                return False
+            self._follow_up_open = False
+            self._follow_up_remaining = 0
+            event = self._follow_up_event(pre_roll)
+            playback = self.playback
+        if playback.is_playing:
+            playback.stop(PlaybackStopReason.STOP)
+        with self._lock:
+            if self._muted or self.state is not DeviceState.IDLE:
+                return False
+            return self._begin_capture(event, pre_roll)
+
+    def advance_follow_up(self, sample_count: int) -> None:
+        """Count microphone samples toward the 5-second window.
+
+        Expiry plays ``follow_up_end`` once and leaves the session ``idle``.
+        A wake word is required again after that.
+        """
+        play_end = False
+        with self._lock:
+            if not self._follow_up_open or self._muted or sample_count <= 0:
+                return
+            self._follow_up_remaining -= sample_count
+            if self._follow_up_remaining > 0:
+                return
+            self._follow_up_open = False
+            self._follow_up_remaining = 0
+            play_end = self.state is DeviceState.IDLE
+        if play_end:
+            self._play_idle_cue(Cue.FOLLOW_UP_END, replace=True)
+
+    def _play_thinking_if_due(self) -> None:
+        """Play one thinking earcon unless a reply already owns the turn."""
+        with self._lock:
+            if not self._thinking_due:
+                return
+            if self._muted or self.state is not DeviceState.CAPTURING:
+                self._thinking_due = False
+                return
+            self._thinking_due = False
+            # Hold the session lock so ``play_reply`` cannot move to
+            # speaking until this cue has the speaker. ``play_reply`` then
+            # cuts it. The cue is not a session state.
+            self.playback.play_cue(Cue.THINKING)
+
+    def _open_follow_up_after_reply(self) -> None:
+        """Open the follow-up listen once after this reply completed."""
+        with self._lock:
+            token = self._pending_follow_up_token
+            if token is None or token != self._reply_token:
+                return
+            if token == self._follow_up_consumed_token:
+                return
+            if self._muted or self.state is not DeviceState.IDLE or self._follow_up_open:
+                return
+            self._follow_up_consumed_token = token
+            self._pending_follow_up_token = None
+            self._follow_up_open = True
+            rate = self.playback.speaker.format.sample_rate_hz
+            self._follow_up_remaining = rate * FOLLOW_UP_WINDOW_MS // 1000
+        self._play_idle_cue(Cue.LISTENING)
+
+    def _play_idle_cue(self, cue: Cue, *, replace: bool = False) -> None:
+        """Play ``cue`` only while idle.
+
+        ``replace`` cuts whatever is already playing. The listening cue does
+        not replace a wake that won the speaker. ``follow_up_end`` does
+        replace the listening cue if that cue is still going.
+        """
+        with self._lock:
+            if self._muted or self.state is not DeviceState.IDLE:
+                return
+            if cue is Cue.LISTENING and not self._follow_up_open:
+                return
+            if self.playback.is_playing and not replace:
+                return
+            self.playback.play_cue(cue)
+
+    def _close_follow_up(self) -> None:
+        """End the window with no ``follow_up_end`` cue."""
+        with self._lock:
+            self._follow_up_open = False
+            self._follow_up_remaining = 0
+
+    def _follow_up_event(self, pre_roll: AudioSnapshot) -> WakeEvent:
+        previous = self._last_wake
+        assert previous is not None
+        end = pre_roll.end_sample_index
+        frame = previous.frame_samples if previous.frame_samples > 0 else 1
+        word_end = end - frame
+        if word_end <= pre_roll.start_sample_index:
+            word_end = min(end, pre_roll.start_sample_index + 1)
+        channels = int(pre_roll.samples.shape[1]) if pre_roll.samples.ndim == 2 else 1
+        return WakeEvent(
+            wake_word=previous.wake_word,
+            model_id=previous.model_id,
+            confidence=previous.confidence,
+            decision_latency_ms=0,
+            winning_channel=0,
+            channels=channels if channels > 0 else previous.channels,
+            sample_rate_hz=pre_roll.sample_rate_hz,
+            frame_samples=frame,
+            decision_frame_index=end // frame,
+            word_end_frame_index=word_end // frame,
+            word_end_sample_index=word_end,
+            decision_sample_index=end,
+        )
 
     def _transition(self, new: DeviceState) -> None:
         assert_transition(self.state, new)

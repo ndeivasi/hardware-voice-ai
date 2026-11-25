@@ -805,7 +805,6 @@ def test_wake_during_flush_tail_stops_playback_and_session_stays_speaking(monkey
         _wait_until(
             lambda: (
                 runtime.orchestrator.state is DeviceState.IDLE
-                and not playback.is_playing
                 and runtime.orchestrator.last_reply_result is not None
                 and runtime.orchestrator.last_reply_result.status is PlaybackStatus.COMPLETED
             ),

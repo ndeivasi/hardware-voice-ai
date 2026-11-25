@@ -89,6 +89,7 @@ def _open_turn(mode: AudioModel = AudioModel.REMOTE):
     assert session.on_wake_accepted(_event(), _snapshot()) is True
     playback.wait()
     session.close_capture()
+    playback.wait()
     assert session.state is DeviceState.CAPTURING
     return session, playback, speaker
 
@@ -247,7 +248,7 @@ def test_cues_are_local_and_distinct_in_either_mode(mode: AudioModel, tmp_path: 
     monkeypatch.chdir(tmp_path)
     fmt = _fmt()
     rendered = [render_cue(cue, fmt) for cue in Cue]
-    assert len({item.tobytes() for item in rendered}) == 3
+    assert len({item.tobytes() for item in rendered}) == len(Cue)
     for cue, expected in zip(Cue, rendered, strict=True):
         assert float(np.max(np.abs(expected))) <= 0.25
         speaker = MemorySpeaker(fmt)
@@ -339,11 +340,17 @@ def test_orchestrator_completion_returns_to_idle() -> None:
     stub.push(audio)
     stub.finish()
     playback.wait()
+    if playback.is_playing:
+        playback.wait()
     assert session.state is DeviceState.IDLE
+    assert session.follow_up_is_active is True
     assert session.last_reply_result is not None
     assert session.last_reply_result.status is PlaybackStatus.COMPLETED
     assert session.playback_status().status is PlaybackStatus.COMPLETED
-    assert np.allclose(speaker.heard()[before:, 0], audio)
+    listening = render_cue(Cue.LISTENING, _fmt())
+    heard = speaker.heard()[before:]
+    assert np.allclose(heard[: len(audio), 0], audio)
+    assert np.allclose(heard[len(audio) :], listening)
     playback.close()
 
 
@@ -355,7 +362,13 @@ def test_reply_plays_locally_for_both_audio_model_modes() -> None:
         before = len(speaker.heard())
         session.play_reply(MemoryReplyAudio(audio, sample_rate_hz=16_000, channels=1))
         playback.wait()
-        heard[mode] = speaker.heard()[before:, 0].copy()
+        if playback.is_playing:
+            playback.wait()
+        heard_now = speaker.heard()[before:]
+        listening = render_cue(Cue.LISTENING, _fmt())
+        assert np.allclose(heard_now[: len(audio), 0], audio)
+        assert np.allclose(heard_now[len(audio) :], listening)
+        heard[mode] = heard_now[: len(audio), 0].copy()
         assert session.state is DeviceState.IDLE
         playback.close()
     assert np.allclose(heard[AudioModel.LOCAL], audio)

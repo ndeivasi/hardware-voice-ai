@@ -97,7 +97,7 @@ class SpeakerPlayback:
 
     @property
     def is_cue_playing(self) -> bool:
-        """True while a local wake, offline, or error cue is still going.
+        """True while a local cue is still going.
 
         This stays true through ``flush``, until the speaker queue is quiet
         or a stop discards it. A spoken reply does not set it.
@@ -129,7 +129,7 @@ class SpeakerPlayback:
     def play_cue(self, cue: Cue) -> PlaybackResult:
         """Play one local cue. The samples are rendered here, not fetched."""
         if not isinstance(cue, Cue):
-            raise ConfigurationError("cue must be wake, offline, or error.")
+            raise ConfigurationError("cue must be a local Cue.")
         rendered = render_cue(cue, self.speaker.format)
         source = MemoryReplyAudio(
             rendered,

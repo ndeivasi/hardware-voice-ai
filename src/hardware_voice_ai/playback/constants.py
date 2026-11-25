@@ -7,3 +7,5 @@ without waiting for the rest of the reply.
 
 STOP_LATENCY_BUDGET_MS = 200
 DEFAULT_QUEUE_MS = 80
+# Microphone time, not a wall clock. The runtime advances this by frames.
+FOLLOW_UP_WINDOW_MS = 5_000
