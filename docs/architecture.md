@@ -10,7 +10,17 @@ Implementation remains blocked. Issues #1–#9 stay on `status:blocked` until Ni
 
 ### High-level design
 
-This is the primary view of the approved hybrid baseline. On-device stages are wake-word detection, microphone capture, and speaker output. Cloud stages are speech-to-text, the language model, and text-to-speech. Those cloud stages are reached only through the gateway, on a per-turn TLS session that opens after an accepted wake.
+This is the primary view of the approved hybrid baseline. On-device stages are wake-word detection, microphone capture, and speaker output. Cloud stages are speech-to-text, the language model, and text-to-speech.
+
+#### What the device sends and receives
+
+v1 wiring across the device boundary:
+
+- **The device sends audio, not text.** After an accepted wake, it streams that turn's utterance to the cloud gateway on one authenticated TLS session (WebSocket or equivalent RPC). Speech-to-text runs in the cloud. The device does not convert speech to text on-device for this path. There is no always-on audio socket. A cancel on that session is a control message, not audio.
+- **Transcripts come back as text.** The gateway sends partial and final transcripts, and errors, to the device as control messages. Those transcripts are not the spoken reply.
+- **The spoken reply comes back as audio.** Text-to-speech streams TTS audio to the device for local playback.
+- **Cues stay on the device.** Wake, offline, and error cues are local audio only. They do not use a cloud audio path.
+- Speech-to-text and text-to-speech interfaces stay swappable for a later on-device path. v1 does not use that path.
 
 ```mermaid
 flowchart TB
@@ -21,34 +31,41 @@ flowchart TB
     wake["Wake-word detection<br/>on-device only, always on"]
     cap["Microphone capture with pre-roll<br/>on-device only<br/>starts on wake; raw audio stays local"]
     orch["Session orchestrator<br/>on-device"]
-    cues["Local cues<br/>wake acknowledgment, offline, or error<br/>no network"]
-    spk["Speaker output<br/>on-device only<br/>playback, barge-in, immediate stop"]
-    mute -.->|"cuts listening"| mic
-    mute -.->|"return to idle"| orch
-    mic --> wake
-    mic --> cap
-    wake -->|"wake accepted"| orch
-    cap -->|"utterance, including pre-roll"| orch
-    orch -->|"local cue"| cues
-    cues --> spk
-    orch -->|"playback, barge-in, immediate stop"| spk
+    cues["Local cues<br/>wake, offline, or error<br/>on-device audio only"]
+    spk["Speaker output<br/>on-device only<br/>plays streamed TTS audio<br/>barge-in and immediate stop"]
+    mute -.->|"control: cuts listening"| mic
+    mute -.->|"control: return to idle"| orch
+    mic -->|"local audio"| wake
+    mic -->|"local audio"| cap
+    wake -->|"control: wake accepted"| orch
+    cap -->|"local audio, including pre-roll"| orch
+    orch -->|"local audio cue only<br/>no cloud path"| cues
+    cues -->|"local audio"| spk
+    orch -->|"AUDIO: play streamed TTS reply<br/>barge-in and immediate stop"| spk
   end
 
-  session["Authenticated TLS streaming session<br/>WebSocket or equivalent RPC<br/>one session per turn<br/>opens only after an accepted wake<br/>no always-on audio socket<br/>to cloud: audio frames and cancel<br/>back: partial and final transcript, TTS audio, errors"]
+  session["Authenticated TLS streaming session<br/>WebSocket or equivalent RPC<br/>one session per turn<br/>opens only after an accepted wake<br/>no always-on audio socket"]
 
   subgraph cloud["Cloud"]
     direction TB
-    gw["Cloud gateway<br/>thin adapters for STT, LLM, and TTS<br/>device does not hard-code vendors<br/>TTS audio returns through this gateway"]
-    stt["Speech-to-text<br/>cloud, streaming, swappable<br/>later on-device STT uses the same contract"]
+    gw["Cloud gateway<br/>thin adapters for STT, LLM, and TTS<br/>device does not hard-code vendors"]
+    stt["Speech-to-text<br/>cloud in v1, not on the device<br/>streaming, swappable<br/>later on-device STT uses the same contract"]
     llm["Language model API call<br/>cloud, streaming"]
-    tts["Text-to-speech<br/>cloud, streaming, swappable<br/>later on-device TTS uses the same contract"]
-    gw --> stt
-    stt -->|"transcript"| llm
-    llm -->|"reply text"| tts
+    tts["Text-to-speech<br/>cloud in v1<br/>returns streamed audio through the gateway<br/>swappable; later on-device TTS uses the same contract"]
+    gw -->|"AUDIO: utterance"| stt
+    stt -->|"TEXT: transcript"| llm
+    llm -->|"TEXT: reply"| tts
   end
 
-  orch <-->|"this turn only"| session
-  session <--> gw
+  audioOut["AUDIO out<br/>this turn's utterance after wake<br/>control: cancel"]
+  textIn["TEXT in<br/>partial and final transcripts, and errors<br/>control messages, not the spoken reply"]
+  audioIn["AUDIO in<br/>streamed TTS reply<br/>this is the spoken reply"]
+
+  orch --> audioOut -->|"AUDIO"| session
+  session -->|"TEXT"| textIn --> orch
+  session -->|"AUDIO"| audioIn --> orch
+  session -->|"AUDIO: utterance"| gw
+  gw -->|"TEXT: transcripts and errors<br/>AUDIO: streamed TTS"| session
 
   classDef onDevice fill:#e8f5e9,stroke:#1b5e20,color:#10240f
   classDef cloud fill:#e3f2fd,stroke:#0d47a1,color:#0a1929
@@ -56,11 +73,11 @@ flowchart TB
   classDef control fill:#fce4ec,stroke:#880e4f,color:#311018
   class mic,wake,cap,orch,cues,spk onDevice
   class gw,stt,llm,tts cloud
-  class session link
+  class session,audioOut,textIn,audioIn link
   class mute control
 ```
 
-Green nodes stay on the device. Blue nodes are the cloud adapters. The session between them is the only path off the device.
+Green nodes stay on the device. Blue nodes are the cloud adapters. Arrow labels say whether a hop carries audio or text. The session is the only path off the device, and it opens after wake.
 
 ### Assumptions
 
