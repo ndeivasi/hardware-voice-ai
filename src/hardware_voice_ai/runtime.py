@@ -10,7 +10,9 @@ import threading
 
 from hardware_voice_ai.audio.ring_buffer import PreRollBuffer
 from hardware_voice_ai.audio.source import AudioSource
-from hardware_voice_ai.capture.port import CapturePort, PendingCapturePort
+from hardware_voice_ai.capture.handoff import QueueUtteranceSink
+from hardware_voice_ai.capture.port import CapturePort
+from hardware_voice_ai.capture.utterance import UtteranceCapture
 from hardware_voice_ai.config import DeviceConfig
 from hardware_voice_ai.errors import ConfigurationError
 from hardware_voice_ai.log.detections import DetectionLog
@@ -22,7 +24,14 @@ from hardware_voice_ai.wake.model import WakeModel
 
 
 class WakeRuntime:
-    """Always-on on-device wake loop."""
+    """Always-on on-device wake loop.
+
+    The default capture is ``UtteranceCapture``. This constructor binds it to
+    the session orchestrator, so callers do not call ``bind_session``. A
+    custom ``CapturePort`` can still be passed for tests. ``utterances`` is
+    the queue for the default capture; it stays ``None`` when the caller
+    supplies a different port.
+    """
 
     def __init__(
         self,
@@ -44,7 +53,12 @@ class WakeRuntime:
             )
         self.config = config
         self.source = source
-        self.capture = capture if capture is not None else PendingCapturePort()
+        if capture is None:
+            self.utterances: QueueUtteranceSink | None = QueueUtteranceSink()
+            capture = UtteranceCapture(self.utterances)
+        else:
+            self.utterances = None
+        self.capture = capture
         self.mute = mute if mute is not None else InMemoryMuteControl()
         self.log = detection_log if detection_log is not None else DetectionLog(
             config.detection_log_path
@@ -56,6 +70,8 @@ class WakeRuntime:
         )
         self.engine = WakeEngine(model if model is not None else build_wake_model(config), config)
         self.orchestrator = SessionOrchestrator(self.capture, audio_model=config.audio_model)
+        if isinstance(self.capture, UtteranceCapture):
+            self.capture.bind_session(self.orchestrator)
         self._lock = threading.RLock()
         self.mute.add_listener(self._on_mute_changed)
         if self.mute.is_muted():
