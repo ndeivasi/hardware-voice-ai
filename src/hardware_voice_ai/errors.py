@@ -1,4 +1,4 @@
-"""Configuration and audio-backend errors."""
+"""Configuration, microphone, and audio-model errors."""
 
 
 class ConfigurationError(ValueError):
@@ -7,3 +7,10 @@ class ConfigurationError(ValueError):
 
 class AudioBackendError(RuntimeError):
     """The selected microphone or speaker backend cannot be opened."""
+
+
+class ModelUnavailable(RuntimeError):
+    """The selected Audio Model cannot take this turn.
+
+    The message is safe to show: it does not include credentials or audio.
+    """

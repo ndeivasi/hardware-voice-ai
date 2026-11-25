@@ -1,9 +1,10 @@
-"""Device configuration for on-device wake detection.
+"""Device configuration for wake detection and the one Audio Model.
 
 The only model choice stored here is Audio Model (``local`` or ``remote``,
-default ``remote``). Wake-word identity, the microphone backend, and the
-speaker backend are swappable. Volume is a playback control, not another
-model setting. Speech-to-text and text-to-speech are not settings.
+default ``remote``). Wake-word identity, the local stand-in, the gateway
+address, and the microphone and speaker backends are swappable. Volume is
+a playback control, not another model setting. Speech-to-text and
+text-to-speech are not settings.
 """
 
 import os
@@ -12,6 +13,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from hardware_voice_ai.audio.frame import AudioFormat
+from hardware_voice_ai.audio_model.defaults import (
+    DEFAULT_FIRST_AUDIO_TIMEOUT_S,
+    DEFAULT_TURN_TIMEOUT_S,
+    REFERENCE_LOCAL_MODEL_ID,
+)
+from hardware_voice_ai.audio_model.gateway import GatewayConfig, parse_gateway_url
 from hardware_voice_ai.errors import ConfigurationError
 from hardware_voice_ai.playback.constants import DEFAULT_QUEUE_MS, STOP_LATENCY_BUDGET_MS
 from hardware_voice_ai.session.audio_model import AudioModel, parse_audio_model
@@ -25,6 +32,10 @@ DEFAULT_PRE_ROLL_MS = 800
 @dataclass(frozen=True, slots=True)
 class DeviceConfig:
     audio_model: AudioModel = AudioModel.REMOTE
+    local_model_id: str = REFERENCE_LOCAL_MODEL_ID
+    gateway: GatewayConfig = GatewayConfig()
+    first_audio_timeout_s: float = DEFAULT_FIRST_AUDIO_TIMEOUT_S
+    turn_timeout_s: float = DEFAULT_TURN_TIMEOUT_S
     wake_word: str = DEFAULT_WAKE_WORD
     wake_model_id: str = REFERENCE_MODEL_ID
     sample_rate_hz: int = 16_000
@@ -49,6 +60,20 @@ class DeviceConfig:
             object.__setattr__(self, "audio_model", parse_audio_model(self.audio_model))
         elif not isinstance(self.audio_model, AudioModel):
             raise ConfigurationError("Audio Model must be 'local' or 'remote'.")
+        if not isinstance(self.local_model_id, str) or not self.local_model_id.strip():
+            raise ConfigurationError("local_model_id must not be empty.")
+        object.__setattr__(self, "local_model_id", self.local_model_id.strip())
+        if not isinstance(self.gateway, GatewayConfig):
+            raise ConfigurationError("gateway configuration is invalid.")
+        if "\n" in self.gateway.token or "\r" in self.gateway.token:
+            raise ConfigurationError("gateway token must be a single line.")
+        parse_gateway_url(self.gateway.url)
+        if self.first_audio_timeout_s <= 0 or self.turn_timeout_s <= 0:
+            raise ConfigurationError("audio model timeouts must be positive.")
+        if self.first_audio_timeout_s > self.turn_timeout_s:
+            raise ConfigurationError(
+                "first_audio_timeout_s must not exceed turn_timeout_s."
+            )
         if isinstance(self.detection_log_path, str):
             if "://" in self.detection_log_path:
                 raise ConfigurationError("Detection logs must be a local file path.")
@@ -137,8 +162,22 @@ class DeviceConfig:
             raise ConfigurationError("Detection logs must be a local file path.")
         device = values.get("HVA_INPUT_DEVICE", "").strip()
         output = values.get("HVA_OUTPUT_DEVICE", "").strip()
+        token = values.get("HVA_GATEWAY_TOKEN", "")
+        if "\n" in token or "\r" in token:
+            raise ConfigurationError("gateway token must be a single line.")
         return cls(
             audio_model=parse_audio_model(values.get("HVA_AUDIO_MODEL", "remote")),
+            local_model_id=values.get("HVA_LOCAL_MODEL", REFERENCE_LOCAL_MODEL_ID),
+            gateway=GatewayConfig(
+                url=values.get("HVA_GATEWAY_URL", "").strip(),
+                token=token.strip(),
+            ),
+            first_audio_timeout_s=_optional_float(
+                values, "HVA_FIRST_AUDIO_TIMEOUT_S", DEFAULT_FIRST_AUDIO_TIMEOUT_S
+            ),
+            turn_timeout_s=_optional_float(
+                values, "HVA_TURN_TIMEOUT_S", DEFAULT_TURN_TIMEOUT_S
+            ),
             wake_word=values.get("HVA_WAKE_WORD", DEFAULT_WAKE_WORD),
             wake_model_id=values.get("HVA_WAKE_MODEL", REFERENCE_MODEL_ID),
             sample_rate_hz=_optional_int(values, "HVA_SAMPLE_RATE", 16_000),

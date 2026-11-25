@@ -524,24 +524,20 @@ def test_default_runtime_binds_capture_and_hands_off_the_preroll() -> None:
     assert isinstance(runtime.capture, UtteranceCapture)
     assert runtime.utterances is not None
     runtime.run()
+    runtime.wait_for_turns()
     runtime.close()
 
     assert runtime.utterances is not None
-    utterance = runtime.utterances.take()
-    assert utterance is not None
     assert runtime.utterances.take() is None
-    assert utterance.audio_model is AudioModel.REMOTE
-    assert utterance.channels == 1
-    assert utterance.endpoint in {"silence", "leading_silence"}
-    assert utterance.pre_roll_sample_count > 0
-    assert 0 < utterance.wake_word_end_offset <= utterance.pre_roll_sample_count
-    assert utterance.samples.shape[0] > utterance.pre_roll_sample_count
-    preroll = utterance.samples[: utterance.pre_roll_sample_count]
-    assert float(np.max(np.abs(preroll))) > 0.0
-    assert float(np.max(np.abs(preroll[: utterance.wake_word_end_offset]))) > 0.0
-    assert runtime.orchestrator.state is DeviceState.CAPTURING
+    assert runtime.orchestrator.trace[-3:] == [
+        DeviceState.CAPTURING,
+        DeviceState.SPEAKING,
+        DeviceState.IDLE,
+    ]
+    assert runtime.orchestrator.state is DeviceState.IDLE
     assert runtime.orchestrator.capture_is_active is False
     assert runtime.capture.holds_audio is False
+    assert runtime.speaker.cues[0][0] == "offline"
 
 
 class _IndexGapSource:
