@@ -10,7 +10,7 @@ When Audio Model is `local`, after an accepted wake word the local audio model p
 
 This is the approved project baseline. Nir Miya approved the hybrid design on 25 Nov 2026 at 1:32 PM Asia/Hong_Kong. The technical design is recorded from the source comment at https://github.com/ndeivasi/hardware-voice-ai/issues/11#issuecomment-7153862494. Nir Miya approved this simpler settings direction on 25 Nov 2026 at 7:16 PM Asia/Hong_Kong: one Audio Model setting, with labels `local` and `remote` only. Separate Speech-to-Text, Text Destination, and Text-to-Speech settings were considered and deferred as too complicated for now. They are not current settings. [Issue 10](https://github.com/ndeivasi/hardware-voice-ai/issues/10) is closed as completed. [Issue 11](https://github.com/ndeivasi/hardware-voice-ai/issues/11) remains open for later architecture changes.
 
-Implementation remains blocked. Issues #1–#9 stay on `status:blocked` until Nir explicitly unlocks them.
+Nir unlocked implementation on 25 Nov 2026 at 7:26 PM Asia/Hong_Kong ([issue 12](https://github.com/ndeivasi/hardware-voice-ai/issues/12)). Issues #1–#9 are `status:todo`.
 
 ### High-level design
 
@@ -164,7 +164,7 @@ These are recommended targets for Audio Model `remote` on a powered device and a
 - [Issue 1](https://github.com/ndeivasi/hardware-voice-ai/issues/1) (wake word) and [issue 2](https://github.com/ndeivasi/hardware-voice-ai/issues/2) (mic capture) are on-device, with a handoff through the orchestrator and a pre-roll buffer. A portable, swappable wake model is consistent with this baseline.
 - [Issues 3–5](https://github.com/ndeivasi/hardware-voice-ai/issues/3), when Audio Model is `remote`, should talk to a cloud gateway behind stable interfaces. The device must not hard-code a vendor. When Audio Model is `local`, that turn does not go to the gateway for the model call.
 - [Issue 6](https://github.com/ndeivasi/hardware-voice-ai/issues/6) must support interruption and local cue playback.
-- A cloud agent was already started for issue 1 before this design was written. `main` still has no application code, and there is no implementation pull request. That work stays blocked with issues #1–#9. When Nir unlocks it, it should follow this baseline (on-device wake, portable implementation, documented assumptions) and should not expand into cloud STT/LLM/TTS.
+- [Issue 1](https://github.com/ndeivasi/hardware-voice-ai/issues/1) (wake word) is implemented on-device against this baseline: a portable wake model, documented assumptions, and a pre-roll handoff to the session orchestrator. It does not add a cloud speech-to-text, language-model, or text-to-speech pipeline. Issues #2–#9 remain open on `status:todo`.
 
 This baseline is the approved answer to [issue 10](https://github.com/ndeivasi/hardware-voice-ai/issues/10), which is closed as completed. [Issue 11](https://github.com/ndeivasi/hardware-voice-ai/issues/11) remains open for later architecture changes, which should be approved before they replace this baseline.
 
