@@ -29,6 +29,8 @@ def test_defaults_match_the_architecture() -> None:
     assert config.pre_roll_ms == 800
     assert config.confirm_ms == 240
     assert config.detection_log_path is None
+    assert config.volume == 1.0
+    assert config.playback_queue_ms == 80
     assert config.audio_format.channels == 1
     assert config.audio_format.frame_samples == 320
 

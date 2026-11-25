@@ -8,6 +8,8 @@ from dataclasses import replace
 from hardware_voice_ai.audio.source import build_audio_source
 from hardware_voice_ai.config import DeviceConfig
 from hardware_voice_ai.errors import AudioBackendError, ConfigurationError
+from hardware_voice_ai.playback.player import SpeakerPlayback
+from hardware_voice_ai.playback.speaker import build_speaker
 from hardware_voice_ai.runtime import WakeRuntime
 from hardware_voice_ai.session.audio_model import parse_audio_model
 from hardware_voice_ai.wake.defaults import REFERENCE_MODEL_ID
@@ -33,6 +35,11 @@ def main(argv: list[str] | None = None) -> int:
         choices=("local", "remote"),
         help="Audio Model setting. Default is remote.",
     )
+    parser.add_argument(
+        "--volume",
+        type=float,
+        help="Speaker volume from 0 to 1. Default is 1 (unity gain).",
+    )
     args = parser.parse_args(argv)
     try:
         config = DeviceConfig.from_env(os.environ)
@@ -45,20 +52,30 @@ def main(argv: list[str] | None = None) -> int:
             changes["wake_word"] = args.wake_word
         if args.audio_model:
             changes["audio_model"] = parse_audio_model(args.audio_model)
+        if args.volume is not None:
+            changes["volume"] = args.volume
         if changes:
             config = replace(config, **changes)
         source = build_audio_source(
             config.audio_format,
             config.audio_backend,
-            device=_input_device(config.input_device),
+            device=_device(config.input_device),
         )
-        runtime = WakeRuntime(config, source)
+        speaker = build_speaker(
+            config.audio_format,
+            config.audio_backend,
+            device=_device(config.output_device),
+            queue_ms=config.playback_queue_ms,
+        )
+        playback = SpeakerPlayback(speaker, volume=config.volume)
+        runtime = WakeRuntime(config, source, playback=playback)
     except (ConfigurationError, AudioBackendError) as exc:
         print(f"hardware-voice-ai: {exc}", file=sys.stderr)
         return 2
     print(
         f"wake model={config.wake_model_id} label={config.wake_word!r} "
         f"audio_model={config.audio_model.value} channels={config.channels} "
+        f"volume={config.volume:g} "
         f"detection_log={'off' if config.detection_log_path is None else config.detection_log_path}",
         flush=True,
     )
@@ -78,7 +95,7 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _input_device(value: str | None) -> str | int | None:
+def _device(value: str | None) -> str | int | None:
     if value is None:
         return None
     if value.isdigit():

@@ -8,6 +8,9 @@ to capture. The loop does not open a socket.
 
 import threading
 
+import numpy as np
+
+from hardware_voice_ai.audio.frame import AudioFrame
 from hardware_voice_ai.audio.ring_buffer import PreRollBuffer
 from hardware_voice_ai.audio.source import AudioSource
 from hardware_voice_ai.capture.handoff import QueueUtteranceSink
@@ -17,7 +20,10 @@ from hardware_voice_ai.config import DeviceConfig
 from hardware_voice_ai.errors import ConfigurationError
 from hardware_voice_ai.log.detections import DetectionLog
 from hardware_voice_ai.mute.control import InMemoryMuteControl, MuteControl
+from hardware_voice_ai.playback.player import SpeakerPlayback
+from hardware_voice_ai.playback.speaker import NullSpeaker
 from hardware_voice_ai.session.orchestrator import SessionOrchestrator
+from hardware_voice_ai.session.state import DeviceState
 from hardware_voice_ai.wake.engine import WakeEngine
 from hardware_voice_ai.wake.factory import build_wake_model
 from hardware_voice_ai.wake.model import WakeModel
@@ -42,6 +48,7 @@ class WakeRuntime:
         capture: CapturePort | None = None,
         mute: MuteControl | None = None,
         detection_log: DetectionLog | None = None,
+        playback: SpeakerPlayback | None = None,
     ) -> None:
         if (
             source.format.sample_rate_hz != config.sample_rate_hz
@@ -69,7 +76,17 @@ class WakeRuntime:
             sample_rate_hz=config.sample_rate_hz,
         )
         self.engine = WakeEngine(model if model is not None else build_wake_model(config), config)
-        self.orchestrator = SessionOrchestrator(self.capture, audio_model=config.audio_model)
+        if playback is None:
+            playback = SpeakerPlayback(
+                NullSpeaker(config.audio_format, queue_ms=config.playback_queue_ms),
+                volume=config.volume,
+            )
+        self.playback = playback
+        self.orchestrator = SessionOrchestrator(
+            self.capture,
+            audio_model=config.audio_model,
+            playback=playback,
+        )
         if isinstance(self.capture, UtteranceCapture):
             self.capture.bind_session(self.orchestrator)
         self._lock = threading.RLock()
@@ -91,33 +108,48 @@ class WakeRuntime:
             pass
 
     def close(self) -> None:
-        self.source.close()
+        try:
+            self.playback.close()
+        finally:
+            self.source.close()
 
     def _handle(self, frame) -> None:
         with self._lock:
             if self.mute.is_muted() or self.orchestrator.is_muted:
                 return
-            self.buffer.write(frame)
+            # A local cue is tones. Do not score it and do not put it in the
+            # utterance. The mic still hears the room; this tap does not keep
+            # those frames. Echo cancellation during a spoken reply is later.
+            heard = _without_cue(frame) if self.playback.is_cue_playing else frame
+            self.buffer.write(heard)
             if self.orchestrator.capture_is_active:
                 try:
-                    self.capture.on_frame(frame)
+                    self.capture.on_frame(heard)
                 except Exception:
                     # on_frame failed (a frame index or format mismatch).
                     # Cancel drops the utterance, records the failed capture
                     # on the capture log, and returns the session to idle.
                     # Keep reading the microphone.
                     self.orchestrator.cancel()
-            event = self.engine.process(frame)
+            event = self.engine.process(heard)
             if event is None:
+                return
+            if self.playback.is_cue_playing:
+                self.log.record(
+                    event,
+                    accepted=False,
+                    audio_model=self.orchestrator.audio_model,
+                )
                 return
             try:
                 accepted = self.orchestrator.on_wake_accepted(
                     event, self.buffer.snapshot()
                 )
             except Exception:
-                # CapturePort.start failed. The orchestrator is back in idle.
-                # Keep reading the microphone and record the wake as not accepted.
-                accepted = False
+                # CapturePort.start rolls the session back to idle. A cue
+                # error can still leave the turn in capturing; that wake
+                # was accepted. Keep reading the microphone either way.
+                accepted = self.orchestrator.state is DeviceState.CAPTURING
             self.log.record(
                 event,
                 accepted=accepted,
@@ -130,3 +162,12 @@ class WakeRuntime:
             if muted:
                 self.buffer.clear()
                 self.engine.reset()
+
+
+def _without_cue(frame: AudioFrame) -> AudioFrame:
+    """Same index and format as ``frame``, with silence in place of the cue."""
+    return AudioFrame(
+        samples=np.zeros_like(frame.samples),
+        format=frame.format,
+        sample_index=frame.sample_index,
+    )

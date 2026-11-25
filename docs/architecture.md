@@ -14,7 +14,7 @@ When Audio Model is `local`, after an accepted wake the local Audio Model proces
 
 This is the approved project baseline. Nir Miya approved the hybrid design on 25 Nov 2026 at 1:32 PM Asia/Hong_Kong. The technical design is recorded from the source comment at https://github.com/ndeivasi/hardware-voice-ai/issues/11#issuecomment-7153862494. Nir Miya approved one Audio Model setting, with the labels `local` and `remote` only, on 25 Nov 2026 at 7:16 PM Asia/Hong_Kong. Nir Miya approved this tighter design in chat with Architect on 25 Nov 2026 at 7:24 PM Asia/Hong_Kong. It replaces prior multi-toggle designs. The Audio Model is the one component that consumes the user's audio and produces the spoken reply. [Issue 10](https://github.com/ndeivasi/hardware-voice-ai/issues/10) is closed as completed. [Issue 11](https://github.com/ndeivasi/hardware-voice-ai/issues/11) remains open for later architecture changes.
 
-Implementation is unlocked. Nir unlocked it on 25 Nov 2026 at 7:26 PM Asia/Hong_Kong. [Issue 12](https://github.com/ndeivasi/hardware-voice-ai/issues/12) is closed. Issues #1–#9 are `status:todo`.
+Implementation is unlocked. Nir unlocked it on 25 Nov 2026 at 7:26 PM Asia/Hong_Kong. [Issue 12](https://github.com/ndeivasi/hardware-voice-ai/issues/12) is closed. Wake word ([issue 1](https://github.com/ndeivasi/hardware-voice-ai/issues/1)), microphone capture ([issue 2](https://github.com/ndeivasi/hardware-voice-ai/issues/2)), and speaker playback ([issue 6](https://github.com/ndeivasi/hardware-voice-ai/issues/6)) are implemented on the device. Issues 3–5 and 7–9 remain open.
 
 ### High-level design
 
@@ -150,7 +150,7 @@ The mermaid diagram above is the primary high-level view, including Audio Model 
 
 The device owns the session state machine: `idle → woken → capturing → speaking → idle`. During the turn the Audio Model receives the user's audio and produces the spoken reply. Playback of that reply is local and can begin while the reply is still streaming. Cancel, barge-in/stop, and mute can return to `idle` from any later state.
 
-`DeviceState` in `src/hardware_voice_ai/session/state.py` still includes `transcribing` and `thinking`, and its allowed transitions still run `capturing → transcribing → thinking → speaking`. A follow-up should change that code to this state machine. This document does not change that code.
+`DeviceState` still includes `transcribing` and `thinking` from an earlier draft of this chain. Speaker playback enters `speaking` from `capturing` after the microphone tap closes. Removing `transcribing` and `thinking` remains a follow-up. Those names are not Audio Model settings, and this package does not run them.
 
 ### Component placement
 
@@ -199,10 +199,10 @@ These are recommended targets for Audio Model `remote` on a powered device and a
 
 ### Implications for open implementation issues
 
-- [Issue 1](https://github.com/ndeivasi/hardware-voice-ai/issues/1) (wake word) is implemented on-device against this baseline: a portable wake model, documented assumptions, and a pre-roll handoff to the session orchestrator. [Issue 2](https://github.com/ndeivasi/hardware-voice-ai/issues/2) (mic capture) continues that on-device handoff. Issues #2–#9 are open on `status:todo`.
-- [Issue 3](https://github.com/ndeivasi/hardware-voice-ai/issues/3), [issue 4](https://github.com/ndeivasi/hardware-voice-ai/issues/4), and [issue 5](https://github.com/ndeivasi/hardware-voice-ai/issues/5) are open on `status:todo`. This baseline does not split the voice loop into separate speech-to-text, text destination, and text-to-speech stages. The Audio Model is the one component that consumes the user's audio and produces the spoken reply. A `remote` Audio Model talks to the cloud gateway behind stable interfaces, and the device must not hard-code a vendor. A `local` Audio Model does not send that turn off the device for the model call.
-- [Issue 6](https://github.com/ndeivasi/hardware-voice-ai/issues/6) must support interruption and local cue playback.
-- `DeviceState` still includes `transcribing` and `thinking`. A follow-up should align that code with `idle → woken → capturing → speaking → idle`.
+- [Issue 1](https://github.com/ndeivasi/hardware-voice-ai/issues/1) (wake word) is implemented on-device against this baseline: a portable wake model, documented assumptions, and a pre-roll handoff to the session orchestrator. [Issue 2](https://github.com/ndeivasi/hardware-voice-ai/issues/2) (microphone capture) is implemented on that handoff.
+- [Issue 3](https://github.com/ndeivasi/hardware-voice-ai/issues/3), [issue 4](https://github.com/ndeivasi/hardware-voice-ai/issues/4), and [issue 5](https://github.com/ndeivasi/hardware-voice-ai/issues/5) remain open on `status:todo`. This baseline does not split the voice loop into separate speech-to-text, text destination, and text-to-speech stages. The Audio Model is the one component that consumes the user's audio and produces the spoken reply. A `remote` Audio Model talks to the cloud gateway behind stable interfaces, and the device must not hard-code a vendor. A `local` Audio Model does not send that turn off the device for the model call.
+- [Issue 6](https://github.com/ndeivasi/hardware-voice-ai/issues/6) (speaker playback) is implemented on the device: reply audio, volume, interruption, and local wake, offline, and error cues. See [playback.md](playback.md). Issues 7–9 remain open.
+- `DeviceState` still includes `transcribing` and `thinking`. Playback enters `speaking` from `capturing`. Removing the unused states remains a follow-up.
 
 This baseline is the approved answer to [issue 10](https://github.com/ndeivasi/hardware-voice-ai/issues/10), which is closed as completed. [Issue 11](https://github.com/ndeivasi/hardware-voice-ai/issues/11) remains open for later architecture changes, which should be approved before they replace this baseline.
 

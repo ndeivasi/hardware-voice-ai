@@ -2,7 +2,7 @@
 
 This package is the on-device wake path from the [architecture baseline](architecture.md). Always-on audio stays on the device. An accepted wake notifies the session orchestrator. There is no speech-to-text stage and no text-to-speech stage.
 
-The session states are `idle → woken → capturing → transcribing → thinking → speaking → idle`. This work takes `idle → woken → capturing`. Cancel and hardware mute return to `idle` from any later state this package can enter. Barge-in during playback is later work, so a wake is ignored unless the session is idle.
+The session states are `idle → woken → capturing → transcribing → thinking → speaking → idle`. This work takes `idle → woken → capturing`. Cancel and hardware mute return to `idle` from any later state this package can enter. A wake during capture is ignored. A wake during speaker playback stops that playback and starts a new turn; see [playback.md](playback.md).
 
 ## Assumptions
 
@@ -88,6 +88,6 @@ Issue 2 should not upload always-on audio. Only the post-wake utterance, includi
 
 ## What this package does not do
 
-- The local or remote audio model, the cloud gateway, and speaker playback (issues 3–6). Post-wake utterance capture is `UtteranceCapture`; see `docs/capture.md`.
+- The local or remote Audio Model and the cloud gateway (issues 3–5). Speaker playback is [playback.md](playback.md). Post-wake utterance capture is `UtteranceCapture`; see [capture.md](capture.md).
 - A separate speech-to-text or text-to-speech setting or pipeline stage.
 - Choosing the production wake word, training a far-field speech model, or selecting the board.

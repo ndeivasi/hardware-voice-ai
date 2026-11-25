@@ -1,8 +1,9 @@
-"""On-device wake-word detection for the hardware voice assistant.
+"""On-device wake word, microphone capture, and speaker playback.
 
 Always-on microphone audio stays in this process. A detection notifies the
-session orchestrator. It does not open a network connection and it does not
-hand audio to a separate speech-to-text stage.
+session orchestrator. Spoken replies and local cues play on the device
+speaker. This package does not run an Audio Model and it does not open a
+network connection.
 """
 
 __version__ = "0.1.0"

@@ -6,4 +6,4 @@ class ConfigurationError(ValueError):
 
 
 class AudioBackendError(RuntimeError):
-    """The selected microphone backend cannot be opened."""
+    """The selected microphone or speaker backend cannot be opened."""

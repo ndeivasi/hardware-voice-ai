@@ -67,6 +67,6 @@ Raw audio is not written by default. `CaptureLog` is off unless it is constructe
 ## What this package does not do
 
 - The wake-word detector, or opening a second microphone. The wake runtime is the only reader of the device.
-- The local or remote Audio Model, the cloud gateway, and speaker playback.
+- The local or remote Audio Model and the cloud gateway. Speaker playback is documented in [playback.md](playback.md).
 - A speech-to-text, text-destination, or text-to-speech setting or pipeline stage.
 - Choosing the board, the microphones, or the production wake word.
