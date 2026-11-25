@@ -5,7 +5,11 @@ The session orchestrator plays spoken-reply audio and local cues through
 not run the Audio Model and does not open a cloud session.
 """
 
-from hardware_voice_ai.playback.constants import DEFAULT_QUEUE_MS, STOP_LATENCY_BUDGET_MS
+from hardware_voice_ai.playback.constants import (
+    DEFAULT_QUEUE_MS,
+    FOLLOW_UP_WINDOW_MS,
+    STOP_LATENCY_BUDGET_MS,
+)
 from hardware_voice_ai.playback.cues import Cue, render_cue
 from hardware_voice_ai.playback.player import (
     PlaybackResult,
@@ -24,6 +28,7 @@ from hardware_voice_ai.playback.speaker import (
 
 __all__ = [
     "DEFAULT_QUEUE_MS",
+    "FOLLOW_UP_WINDOW_MS",
     "STOP_LATENCY_BUDGET_MS",
     "Cue",
     "MemoryReplyAudio",

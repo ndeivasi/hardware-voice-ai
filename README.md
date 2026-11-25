@@ -2,7 +2,7 @@
 
 On-device wake-word detection, microphone capture, speaker playback, and one Audio Model voice loop. The approved design is [docs/architecture.md](docs/architecture.md). Wake-word assumptions are in [docs/wake-word.md](docs/wake-word.md). Microphone capture after an accepted wake is in [docs/capture.md](docs/capture.md). Speaker playback is in [docs/playback.md](docs/playback.md). The voice loop is in [docs/audio-model.md](docs/audio-model.md).
 
-Always-on microphone audio stays in this process. An accepted wake moves the session from `idle` to `woken` to `capturing` and hands a short pre-roll to microphone capture. The device has one Audio Model setting, `local` or `remote`, default `remote`. After capture ends the utterance, that one model takes the audio and produces the spoken reply. Playback, volume, and local wake, offline, and error cues stay on the device speaker in both modes. Speech-to-text and text-to-speech are not separate stages.
+Always-on microphone audio stays in this process. An accepted wake moves the session from `idle` to `woken` to `capturing` and hands a short pre-roll to microphone capture. The device has one Audio Model setting, `local` or `remote`, default `remote`. After capture ends the utterance, that one model takes the audio and produces the spoken reply. Playback, volume, and local cues stay on the device speaker in both modes. Those cues are wake, offline, error, thinking, listening, and follow-up end. Speech-to-text and text-to-speech are not separate stages.
 
 The remote adapters are Moshi (default), MiniCPM-o 4.5, and Qwen3-Omni Instruct. They run in a separate gateway process on a GPU host. The local stand-in stays `reference-audio-v1`. See [docs/remote-backends.md](docs/remote-backends.md).
 

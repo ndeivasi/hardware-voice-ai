@@ -199,9 +199,31 @@ class WakeRuntime:
             # A local cue is tones. Do not score it and do not put it in the
             # utterance. The mic still hears the room; this tap does not keep
             # those frames. Echo cancellation during a spoken reply is later.
-            heard = _without_cue(frame) if self.playback.is_cue_playing else frame
+            # Speech that opens the follow-up window is the real frame: the
+            # listening cue must not hide it, and it is not forwarded twice.
+            follow_up = self.orchestrator.follow_up_is_active
+            speech = follow_up and self.orchestrator.follow_up_hears_speech(frame)
+            heard = frame if speech or not self.playback.is_cue_playing else _without_cue(frame)
             self.buffer.write(heard)
-            if self.orchestrator.capture_is_active:
+            opened_follow_up = False
+            if follow_up:
+                if speech:
+                    try:
+                        opened_follow_up = self.orchestrator.accept_follow_up_speech(
+                            self.buffer.snapshot()
+                        )
+                    except Exception:
+                        opened_follow_up = (
+                            self.orchestrator.state is DeviceState.CAPTURING
+                        )
+                    if (
+                        not opened_follow_up
+                        and self.orchestrator.follow_up_is_active
+                    ):
+                        self.orchestrator.advance_follow_up(frame.format.frame_samples)
+                else:
+                    self.orchestrator.advance_follow_up(frame.format.frame_samples)
+            if self.orchestrator.capture_is_active and not opened_follow_up:
                 try:
                     self.capture.on_frame(heard)
                 except Exception:

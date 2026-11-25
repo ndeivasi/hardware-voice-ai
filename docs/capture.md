@@ -33,7 +33,7 @@ runtime = WakeRuntime(config, source)
 
 | Call | When | What capture does |
 | --- | --- | --- |
-| `start(CaptureRequest)` | Wake accepted, session moved `idle → woken → capturing` | Keep `wake` (no samples of its own), `pre_roll`, and `audio_model`. |
+| `start(CaptureRequest)` | Wake accepted, or speech in the follow-up window, session moved `idle → woken → capturing` | Keep `wake` (no samples of its own), `pre_roll`, and `audio_model`. |
 | `on_frame(AudioFrame)` | Each later microphone frame while the tap is open | Append it. On end-of-utterance, call `session.close_capture()`. |
 | `stop(end_of_utterance)` | `SessionOrchestrator.close_capture` | Hand a `CapturedUtterance` to the sink. Leave the session in `capturing`. Capture does not run the model. |
 | `stop(cancel)` | `SessionOrchestrator.cancel` | Drop the buffer. Do not call the sink. Session returns to `idle`. |
@@ -43,7 +43,7 @@ runtime = WakeRuntime(config, source)
 
 If `on_frame` raises (a frame index or format mismatch), `WakeRuntime` cancels the turn. Cancel drops the buffer, the capture log records the failed stop, and the session returns to idle. The microphone loop keeps reading. A later wake can open a new turn.
 
-`close_capture` stops the tap and does not run an Audio Model. `QueueUtteranceSink.accept_utterance` only enqueues. It runs on the microphone thread, under the orchestrator's lock, so it returns without starting a model. After a successful handoff returns, `WakeRuntime` takes the queued utterance and runs the one Audio Model off the microphone thread. The session then moves `capturing → speaking → idle`. `local` keeps the audio on the device. `remote` may send that utterance, and only that utterance, to the gateway. Always-on audio is not in the buffer.
+`close_capture` stops the tap, plays the local `thinking` cue, and does not run an Audio Model. The session stays in `capturing`. `thinking` here is audio, not a session state. `QueueUtteranceSink.accept_utterance` only enqueues. It runs on the microphone thread, under the orchestrator's lock, so it returns without starting a model. After a successful handoff returns, `WakeRuntime` takes the queued utterance and runs the one Audio Model off the microphone thread. The session then moves `capturing → speaking → idle`. A completed spoken reply can open a 5-second follow-up listen that calls `start` again without a new wake-word detection. That request still carries a `WakeEvent`, reusing the previous wake's word and model id, as described in [playback.md](playback.md). `local` keeps the audio on the device. `remote` may send that utterance, and only that utterance, to the gateway. Always-on audio is not in the buffer.
 
 `CapturedUtterance` fields:
 

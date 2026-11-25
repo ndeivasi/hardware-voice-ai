@@ -43,7 +43,7 @@ The selected Audio Model receives the user's audio and produces the spoken reply
 
 - **`remote` (default).** Only after an accepted wake, the device opens one authenticated TLS session (WebSocket or equivalent RPC) and streams that turn's audio to the cloud gateway. There is no always-on audio socket. The selected Audio Model (`remote`) runs behind the gateway. The device must not hard-code a vendor; the gateway holds swappable adapters. Those adapters are Moshi (the default), MiniCPM-o 4.5, and Qwen3-Omni Instruct. Choosing one is not a third Audio Model label. They need a GPU and do not run on a Pi-class board. The spoken reply returns as streamed audio for local playback. Control messages on the session, when needed, are errors, end of turn, and barge-in/stop. Those control messages are distinct from the spoken reply, which is audio.
 - **`local`.** After an accepted wake, that turn's audio is processed on the device by the local Audio Model and does not leave the device for the model call. The spoken reply plays locally. There is no cloud session for the model call. The on-device stand-in is `reference-audio-v1`. It is not one of the remote GPU adapters. A local Audio Model has tighter on-device compute requirements than the remote default.
-- **Cues.** Wake, offline, and error cues are local audio in both modes. They do not use a cloud audio path.
+- **Cues.** Wake, offline, error, thinking, listening, and follow-up-end cues are local audio in both modes. They do not use a cloud audio path. The thinking cue is an earcon played when capture ends. It is audio only, not a session state.
 
 ```mermaid
 flowchart TB
@@ -56,7 +56,7 @@ flowchart TB
     cap["Microphone capture with pre-roll<br/>starts on an accepted wake"]
     orch["Session orchestrator"]
     localModel["Audio Model: local<br/>user audio in, spoken reply out<br/>this turn stays on the device"]
-    cues["Wake, offline, and error cues<br/>local audio in both modes"]
+    cues["Local cues<br/>wake, offline, error,<br/>thinking, listening, follow-up end<br/>both modes"]
     spk["Speaker<br/>local playback<br/>barge-in and immediate stop"]
     setting --> orch
     mute -.->|"control: cuts listening"| mic
@@ -100,7 +100,7 @@ flowchart TB
   class mute control
 ```
 
-`local` keeps that turn's audio on the device. The local Audio Model consumes it and the spoken reply plays there. `remote` is the default: after an accepted wake, the device streams that turn's audio to the gateway and plays the streamed spoken reply locally. Playback is on the device in both modes. Wake, offline, and error cues are local audio either way. Control messages are errors, end of turn, and barge-in/stop. The spoken reply is audio.
+`local` keeps that turn's audio on the device. The local Audio Model consumes it and the spoken reply plays there. `remote` is the default: after an accepted wake, the device streams that turn's audio to the gateway and plays the streamed spoken reply locally. Playback is on the device in both modes. Wake, offline, error, thinking, listening, and follow-up-end cues are local audio either way. Control messages are errors, end of turn, and barge-in/stop. The spoken reply is audio.
 
 #### Confirmation and failure
 
@@ -145,12 +145,13 @@ The mermaid diagram above is the primary high-level view, including Audio Model 
                                       |
                                [speaker] <-- playback / barge-in (on-device)
                                hardware mute (authoritative)
-                               wake, offline, and error cues (local audio)
+                               wake, offline, error, thinking, listening,
+                               and follow-up-end cues (local audio)
 ```
 
-The device owns the session state machine: `idle → woken → capturing → speaking → idle`. During the turn the Audio Model receives the user's audio and produces the spoken reply. The model runs off the microphone thread, so the always-on loop keeps reading frames. Playback of that reply is local and can begin while the reply is still streaming. The session stays in `speaking` until that playback finishes flushing, so a wake during the tail still stops the speaker. Cancel and hardware mute return the session to `idle` from any later state. Hardware mute stops playback and does not resume it when released. A wake accepted during `speaking` cancels that Audio Model turn, stops playback, and starts a new capture. A local cue is kept out of the capture buffer and is not accepted as another wake.
+The device owns the session state machine: `idle → woken → capturing → speaking → idle`. During the turn the Audio Model receives the user's audio and produces the spoken reply. The model runs off the microphone thread, so the always-on loop keeps reading frames. Playback of that reply is local and can begin while the reply is still streaming. The session stays in `speaking` until that playback finishes flushing, so a wake during the tail still stops the speaker. A completed reply returns to `idle` and opens a 5-second follow-up listen. That listen is not a new state. Speech in the window starts a capture without a new wake word; silence through the window plays a local end cue and idle then requires the wake word again. Cancel and hardware mute return the session to `idle` from any later state and do not play that end cue. Hardware mute stops playback and does not resume it when released. A wake accepted during `speaking` cancels that Audio Model turn, stops playback, and starts a new capture. A local cue is kept out of the capture buffer and is not accepted as another wake.
 
-`DeviceState` is that chain: `idle`, `woken`, `capturing`, and `speaking`. Speaker playback enters `speaking` from `capturing` after the microphone tap closes.
+`DeviceState` is that chain: `idle`, `woken`, `capturing`, and `speaking`. Speaker playback enters `speaking` from `capturing` after the microphone tap closes. The `thinking` cue is audio only. It does not add a session state.
 
 ### Component placement
 
@@ -162,7 +163,7 @@ These parts describe where the work runs. They are not extra device settings. Th
 | Microphone capture | On-device only | Raw audio and a short pre-roll buffer stay local. Capture starts on an accepted wake (including audio from just before the wake word ends) and stops on end-of-utterance or cancel. |
 | Audio Model | `remote` default: a cloud service behind the gateway. `local`: on the device | One model handles the full voice loop. It receives the user's audio and produces the spoken reply. `remote` fits a first board that should not have to run the model. The gateway holds the adapters, so the device does not hard-code a vendor. The adapters are Moshi (default), MiniCPM-o 4.5, and Qwen3-Omni Instruct, on a GPU host. `local` keeps that turn on the device. The stand-in is `reference-audio-v1`. |
 | Speaker output | On-device only | Playback, volume, and immediate stop/barge-in are local in both modes. The speaker path must be interruptible so a new wake or "stop" is not blocked by playback. |
-| Wake, offline, and error cues | On-device local audio in both modes | Cues stay local. They do not use the cloud audio path. |
+| Wake, offline, error, thinking, listening, and follow-up-end cues | On-device local audio in both modes | Cues stay local. They do not use the cloud audio path. Patterns are in [playback.md](playback.md). |
 
 ### Inter-component communication
 
@@ -201,7 +202,7 @@ These are recommended targets for Audio Model `remote` on a powered device and a
 
 - [Issue 1](https://github.com/ndeivasi/hardware-voice-ai/issues/1) (wake word) is implemented on-device: a portable wake model, documented assumptions, and a pre-roll handoff to the session orchestrator. [Issue 2](https://github.com/ndeivasi/hardware-voice-ai/issues/2) (microphone capture) is implemented on-device and hands the post-wake utterance to that orchestrator.
 - [Issue 3](https://github.com/ndeivasi/hardware-voice-ai/issues/3), [issue 4](https://github.com/ndeivasi/hardware-voice-ai/issues/4), and [issue 5](https://github.com/ndeivasi/hardware-voice-ai/issues/5) are one Audio Model voice loop. It receives the user's audio and produces the spoken reply. A `remote` Audio Model talks to the cloud gateway behind stable interfaces, and the device must not hard-code a vendor. A `local` Audio Model does not send that turn off the device for the model call. The model runs off the microphone thread. A wake during speaking cancels the turn, stops playback, and starts a new capture.
-- [Issue 6](https://github.com/ndeivasi/hardware-voice-ai/issues/6) (speaker playback) is implemented on the device: reply audio, volume, interruption, and local wake, offline, and error cues. See [playback.md](playback.md). A wake during speaking cuts playback. Hardware mute stops playback and does not resume it when released. Local cues are kept out of capture and wake scoring.
+- [Issue 6](https://github.com/ndeivasi/hardware-voice-ai/issues/6) (speaker playback) is implemented on the device: reply audio, volume, interruption, and local cues (wake, offline, error, thinking, listening, and follow-up end). See [playback.md](playback.md). A wake during speaking cuts playback. Hardware mute stops playback and does not resume it when released. Local cues are kept out of capture and wake scoring. After a completed reply the device listens for 5 seconds without a new wake word.
 - [Issues 7–9](https://github.com/ndeivasi/hardware-voice-ai/issues/7) remain open.
 - `DeviceState` is `idle`, `woken`, `capturing`, and `speaking`. Playback enters `speaking` from `capturing` after the microphone tap closes.
 

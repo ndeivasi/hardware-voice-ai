@@ -8,11 +8,11 @@ The approved baseline is [architecture.md](architecture.md). This note records h
 
 The device states are `idle → woken → capturing → speaking → idle`.
 
-After an accepted wake the session is `capturing`. `UtteranceCapture` decides that the user has stopped speaking and calls `SessionOrchestrator.close_capture`. That stops the tap, enqueues the utterance, and leaves the session in `capturing`. It does not start the model. `accept_utterance` only enqueues, because it runs under the orchestrator lock.
+After an accepted wake the session is `capturing`. `UtteranceCapture` decides that the user has stopped speaking and calls `SessionOrchestrator.close_capture`. That stops the tap, enqueues the utterance, plays one local `thinking` cue, and leaves the session in `capturing`. It does not start the model. `accept_utterance` only enqueues, because it runs under the orchestrator lock. The thinking cue is not a loop. Reply audio cuts it so the tone does not overlap the spoken reply.
 
 When `poll` sees that queued utterance, it moves the session to `speaking` before it reads another frame, then starts the one Audio Model on a separate thread and keeps reading the microphone. A wake in that gap, or any wake during `speaking`, cancels the turn, stops playback, and starts a new capture. The spoken reply is played with `play_reply`. A local failure cue is played with `play_cue`. `_finish_turn` clears that turn once, under the session lock, and only while it is still the one speaking. If playback is still flushing, the session stays in `speaking` until flush completes; `_on_reply_finished` is what returns it to `idle`. A wake in that tail stops playback and starts a new capture. If a new capture is already open, the finishing turn leaves it alone. Cancel and hardware mute return to `idle` without playing a cue. Hardware mute does not resume playback when it is released.
 
-`submit_utterance` is also public for a caller that already holds a `CapturedUtterance`:
+`submit_utterance` is also public for a caller that already holds a `CapturedUtterance`. A completed spoken reply then opens a 5-second follow-up listen on `idle` and plays the local `listening` cue. Speech in that window is captured without a new wake word. Silence through the window plays `follow_up_end`. Mute, stop, and cancel do not. The patterns and the wake-word assumption are in [playback.md](playback.md). Failure, cancel, and mute do not open the window.
 
 ```python
 result = runtime.orchestrator.submit_utterance(utterance)
@@ -46,7 +46,7 @@ Speaker playback is implemented in [playback.md](playback.md). The voice loop wr
 
 `MemorySpeaker` in this package records that audio in memory and does not open a device. Playback's `MemorySpeaker` and `NullSpeaker` are the stand-ins for the device speaker. `stop` rejects later reply writes. Speaker methods must not call back into the session.
 
-Wake, offline, and error cues are synthesized in-process. They never use the gateway. Cancel and mute do not play a cue; they stop playback and return to idle. Releasing mute does not resume audio.
+Wake, offline, error, thinking, listening, and follow-up-end cues are synthesized in-process. They never use the gateway. Cancel and mute do not play a cue; they stop playback and return to idle. Releasing mute does not resume audio. A completed reply's follow-up cues are the exception described above: `listening` when the window opens, and `follow_up_end` only when it expires with no speech.
 
 ## `local`
 
