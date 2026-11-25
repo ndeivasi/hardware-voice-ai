@@ -93,5 +93,13 @@ def test_runtime_opt_in_log_has_no_audio(tmp_path) -> None:
 
 
 def test_remote_log_urls_are_rejected() -> None:
-    with pytest.raises(ConfigurationError):
+    with pytest.raises(ConfigurationError, match="local file path"):
         DeviceConfig(detection_log_path="https://example.com/detections.jsonl")
+
+
+def test_env_detection_log_url_is_rejected_before_path_normalization() -> None:
+    url = "https://example.com/detections.jsonl"
+    with pytest.raises(ConfigurationError, match="local file path"):
+        DeviceConfig.from_env({"HVA_DETECTION_LOG": url})
+    with pytest.raises(ConfigurationError, match="local file path"):
+        DeviceConfig.from_env({"HVA_DETECTION_LOG": "s3://bucket/detections.jsonl"})

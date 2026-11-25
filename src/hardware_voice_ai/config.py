@@ -113,6 +113,9 @@ class DeviceConfig:
     def from_env(cls, env: Mapping[str, str] | None = None) -> "DeviceConfig":
         values = os.environ if env is None else env
         log_path = values.get("HVA_DETECTION_LOG", "").strip()
+        # Path("https://...") collapses "://" to ":/", so reject the raw value first.
+        if "://" in log_path:
+            raise ConfigurationError("Detection logs must be a local file path.")
         device = values.get("HVA_INPUT_DEVICE", "").strip()
         return cls(
             audio_model=parse_audio_model(values.get("HVA_AUDIO_MODEL", "remote")),

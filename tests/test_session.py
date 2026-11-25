@@ -21,7 +21,7 @@ from hardware_voice_ai.session.state import (
 from hardware_voice_ai.wake.events import WakeEvent
 from hardware_voice_ai.wake.model import WakeScore
 from hardware_voice_ai.wake.reference import default_template, render_pattern
-from tests.support import RecordingCapture, silence
+from tests.support import MemoryLog, RecordingCapture, silence
 
 
 def _event() -> WakeEvent:
@@ -99,6 +99,47 @@ def test_failed_handoff_returns_to_idle() -> None:
     with pytest.raises(RuntimeError, match="capture unavailable"):
         session.on_wake_accepted(_event(), _snapshot())
     assert session.state is DeviceState.IDLE
+
+
+def test_failed_capture_start_keeps_listening() -> None:
+    """A handoff error returns to idle, records the miss, and the loop continues."""
+
+    class FlakyCapture:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.requests = []
+
+        def start(self, request) -> None:
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("capture unavailable")
+            self.requests.append(request)
+
+        def on_frame(self, frame) -> None:
+            del frame
+
+        def stop(self, reason) -> None:
+            del reason
+
+    word = render_pattern(default_template())
+    gap = silence(int(1.2 * 16000))
+    samples = np.concatenate((silence(1600), word, gap, word, silence(8000)))
+    config = DeviceConfig()
+    capture = FlakyCapture()
+    log = MemoryLog()
+    runtime = WakeRuntime(
+        config,
+        PcmAudioSource(samples, config.audio_format),
+        capture=capture,
+        detection_log=log,
+    )
+    runtime.run()
+    runtime.close()
+    assert [accepted for _event, accepted, _model in log.records] == [False, True]
+    assert runtime.orchestrator.state is DeviceState.CAPTURING
+    assert runtime.orchestrator.is_muted is False
+    assert capture.calls == 2
+    assert len(capture.requests) == 1
 
 
 def test_cancel_and_mute_stop_capture_and_return_to_idle() -> None:

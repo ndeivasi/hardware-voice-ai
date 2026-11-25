@@ -87,7 +87,14 @@ class WakeRuntime:
             event = self.engine.process(frame)
             if event is None:
                 return
-            accepted = self.orchestrator.on_wake_accepted(event, self.buffer.snapshot())
+            try:
+                accepted = self.orchestrator.on_wake_accepted(
+                    event, self.buffer.snapshot()
+                )
+            except Exception:
+                # CapturePort.start failed. The orchestrator is back in idle.
+                # Keep reading the microphone and record the wake as not accepted.
+                accepted = False
             self.log.record(
                 event,
                 accepted=accepted,
