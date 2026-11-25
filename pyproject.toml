@@ -16,6 +16,11 @@ audio = ["sounddevice>=0.4.6"]
 # required to run the on-device path or the tests.
 wake = ["openwakeword>=0.6.0"]
 dev = ["pytest>=8.0"]
+# Remote speech-to-speech adapters. Install these on the GPU host only.
+# The device, the wake path, and the tests do not need them.
+moshi = ["moshi", "torch", "huggingface_hub", "sentencepiece"]
+minicpm = ["torch", "transformers", "librosa"]
+qwen = ["torch", "transformers>=5.2.0"]
 
 [project.scripts]
 hardware-voice-ai = "hardware_voice_ai.__main__:main"

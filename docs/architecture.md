@@ -41,8 +41,8 @@ flowchart TB
 
 The selected Audio Model receives the user's audio and produces the spoken reply. The same component does that work in both modes. The mode chooses where it runs.
 
-- **`remote` (default).** Only after an accepted wake, the device opens one authenticated TLS session (WebSocket or equivalent RPC) and streams that turn's audio to the cloud gateway. There is no always-on audio socket. The selected Audio Model (`remote`) runs behind the gateway. The device must not hard-code a vendor; the gateway holds swappable adapters. The spoken reply returns as streamed audio for local playback. Control messages on the session, when needed, are errors, end of turn, and barge-in/stop. Those control messages are distinct from the spoken reply, which is audio.
-- **`local`.** After an accepted wake, that turn's audio is processed on the device by the local Audio Model and does not leave the device for the model call. The spoken reply plays locally. There is no cloud session for the model call. A local Audio Model has tighter on-device compute requirements than the remote default.
+- **`remote` (default).** Only after an accepted wake, the device opens one authenticated TLS session (WebSocket or equivalent RPC) and streams that turn's audio to the cloud gateway. There is no always-on audio socket. The selected Audio Model (`remote`) runs behind the gateway. The device must not hard-code a vendor; the gateway holds swappable adapters. Those adapters are Moshi (the default), MiniCPM-o 4.5, and Qwen3-Omni Instruct. Choosing one is not a third Audio Model label. They need a GPU and do not run on a Pi-class board. The spoken reply returns as streamed audio for local playback. Control messages on the session, when needed, are errors, end of turn, and barge-in/stop. Those control messages are distinct from the spoken reply, which is audio.
+- **`local`.** After an accepted wake, that turn's audio is processed on the device by the local Audio Model and does not leave the device for the model call. The spoken reply plays locally. There is no cloud session for the model call. The on-device stand-in is `reference-audio-v1`. It is not one of the remote GPU adapters. A local Audio Model has tighter on-device compute requirements than the remote default.
 - **Cues.** Wake, offline, and error cues are local audio in both modes. They do not use a cloud audio path.
 
 ```mermaid
@@ -116,7 +116,7 @@ On failure, three paths stay available, and none of them is a transcript:
 
 - Specific hardware is not chosen yet. Design for a Linux-class single-board computer (Raspberry Pi-class or similar) with at least one microphone and a speaker, and keep audio, model, and transport interfaces swappable when a board is picked.
 - First form factor is not decided (desk, around the room, or carried). The baseline assumes a powered device that may be used across a room. A battery-powered, carried product would tighten the always-on power budget and may need a low-power wake DSP.
-- The default Audio Model is `remote`: one cloud service behind the gateway receives the user's audio and produces the spoken reply, with swappable adapters. The device does not hard-code a vendor. Audio Model `local` runs that same full voice loop on the device. The device state machine is the same for both labels. The only setting is the Audio Model dropdown (`local` or `remote`).
+- The default Audio Model is `remote`: one cloud service behind the gateway receives the user's audio and produces the spoken reply, with swappable adapters. The device does not hard-code a vendor. The gateway process on a GPU host selects Moshi (default), MiniCPM-o 4.5, or Qwen3-Omni Instruct. That choice is not another Audio Model label. Audio Model `local` runs that same full voice loop on the device, with `reference-audio-v1` as the stand-in. The device state machine is the same for both labels. The only Audio Model setting is the dropdown (`local` or `remote`).
 - Network will sometimes be unavailable. The device must still wake and capture. When Audio Model is `remote`, it says it is offline rather than hang. When Audio Model is `local`, the model call does not need the network.
 - Product needs already raised by the User advocate (not yet formal acceptance criteria): hear the user the first time from across the room without triggering on TV or other talk; after wake, catch the request even if speech starts immediately; stop listening when the user is done; speak back what it heard if it may have misheard, so correction can be spoken; keep spoken answers short; stop immediately on request; never send a message, buy something, or take an irreversible action without confirmation; provide a clear way to turn the microphone off completely. Confirmation and failure both stay on the audio path described below.
 
@@ -160,14 +160,14 @@ These parts describe where the work runs. They are not extra device settings. Th
 | --- | --- | --- |
 | Wake word detection | On-device only | Always-on audio must not leave the device. Local detection is the only way to get low latency, privacy, and a hard listening boundary. |
 | Microphone capture | On-device only | Raw audio and a short pre-roll buffer stay local. Capture starts on an accepted wake (including audio from just before the wake word ends) and stops on end-of-utterance or cancel. |
-| Audio Model | `remote` default: a cloud service behind the gateway. `local`: on the device | One model handles the full voice loop. It receives the user's audio and produces the spoken reply. `remote` fits a first board that should not have to run the model, and the gateway holds swappable adapters so the device does not hard-code a vendor. `local` keeps that turn's audio on the device and needs tighter on-device compute. |
+| Audio Model | `remote` default: a cloud service behind the gateway. `local`: on the device | One model handles the full voice loop. It receives the user's audio and produces the spoken reply. `remote` fits a first board that should not have to run the model. The gateway holds the adapters, so the device does not hard-code a vendor. The adapters are Moshi (default), MiniCPM-o 4.5, and Qwen3-Omni Instruct, on a GPU host. `local` keeps that turn on the device. The stand-in is `reference-audio-v1`. |
 | Speaker output | On-device only | Playback, volume, and immediate stop/barge-in are local in both modes. The speaker path must be interruptible so a new wake or "stop" is not blocked by playback. |
 | Wake, offline, and error cues | On-device local audio in both modes | Cues stay local. They do not use the cloud audio path. |
 
 ### Inter-component communication
 
 - On the device, wake word, capture, the session orchestrator, and playback should be tightly coupled (one process or a local message bus). They share the live mic stream and a pre-roll ring buffer so the user can start speaking immediately after the wake word.
-- When Audio Model is `remote`: one authenticated TLS session per turn (WebSocket or equivalent RPC), opened only after an accepted wake. There is no always-on audio socket. The device streams that turn's audio to the cloud gateway. The remote Audio Model runs behind the gateway. The spoken reply returns as streamed audio for local playback. Control messages on that session are limited to errors, end of turn, and barge-in/stop, and they stay distinct from the spoken reply, which is audio.
+- When Audio Model is `remote`: one authenticated TLS session per turn (WebSocket or equivalent RPC), opened only after an accepted wake. There is no always-on audio socket. The device streams that turn's audio to the cloud gateway. The remote Audio Model runs behind the gateway. The session carries length-prefixed JSON control and PCM audio; the spoken reply is the audio, and the gateway runs Moshi by default. Control messages on that session are limited to errors, end of turn, and barge-in/stop, and they stay distinct from the spoken reply. The frame layout is [remote-backends.md](remote-backends.md).
 - When Audio Model is `local`: that turn's audio is processed by the local Audio Model and does not leave the device for the model call. The spoken reply is local audio. There is no cloud session for the model call.
 - The cloud gateway is a thin adapter in front of the remote Audio Model. Prompts for confirmation of irreversible actions are applied here or in the orchestrator, not left to the model alone. The device must not hard-code a vendor; the gateway holds swappable adapters.
 - No always-on audio socket. If the network is down and Audio Model is `remote`, the orchestrator stays local and plays a local offline cue. Other failures use the same split: a local error cue, an error control message on the remote session when that session exists, and, when the Audio Model can still respond, a spoken failure in the reply audio.
@@ -207,10 +207,25 @@ These are recommended targets for Audio Model `remote` on a powered device and a
 
 This baseline is the approved answer to [issue 10](https://github.com/ndeivasi/hardware-voice-ai/issues/10), which is closed as completed. [Issue 11](https://github.com/ndeivasi/hardware-voice-ai/issues/11) remains open for later architecture changes, which should be approved before they replace this baseline.
 
+### Remote speech-to-speech adapters
+
+When Audio Model is `remote`, the gateway runs one open-weight speech-to-speech adapter. Speech-to-text and text-to-speech stay inside that model. They are not pipeline stages and they are not settings.
+
+| Adapter | Id | Default | Weights | Where it runs |
+| --- | --- | --- | --- | --- |
+| Moshi | `moshi` | yes | 7B, CC-BY 4.0 | GPU host, behind the gateway |
+| MiniCPM-o 4.5 | `minicpm-o-4.5` | | 9B, Apache-2.0 | GPU host, behind the gateway |
+| Qwen3-Omni Instruct | `qwen3-omni` | | Apache-2.0, heavier than the other two | GPU host, behind the gateway |
+
+The local stand-in stays `reference-audio-v1`. It is not one of these adapters.
+
+The device opens one authenticated TLS session per turn after an accepted wake. `HVA_GATEWAY_URL` is `tls://<gpu-host>:<port>`. `HVA_GATEWAY_TOKEN` is an operator-chosen secret shared with the gateway. It is not a model-vendor key. The repository does not ship a certificate, a key, or a token. The GPU host is a separate machine. A Pi-class board runs wake, capture, and playback, and does not load these models.
+
+The gateway is what holds the vendor calls. Replacing how Moshi, MiniCPM-o, or Qwen3-Omni is constructed does not change the device session. Setup for the GPU host is [remote-backends.md](remote-backends.md).
+
 ### Open questions that do not block this baseline
 
 - Exact wake word and language.
 - Formal board and microphone/speaker selection.
 - First form factor (desk, room, or carried), which mainly affects power and far-field requirements.
-- Which cloud service the gateway adapters use for the `remote` Audio Model.
-- Which Audio Model is used when the setting is `local`.
+- Which production model runs when Audio Model is `local`. The stand-in is `reference-audio-v1`. The three remote adapters need a GPU, so they are not that on-device model.
