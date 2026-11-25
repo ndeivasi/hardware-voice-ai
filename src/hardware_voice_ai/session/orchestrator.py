@@ -367,7 +367,15 @@ class SessionOrchestrator:
             self._active_turn = None
             if newer_capture:
                 return
-            if self.state is DeviceState.SPEAKING and self.playback.is_playing:
+            # A local cue is not the spoken reply. The reply's own flush is
+            # the tail that must keep the session in speaking. ``play_reply``
+            # does not set the cue flag.
+            reply_still_playing = (
+                self.state is DeviceState.SPEAKING
+                and self.playback.is_playing
+                and not self.playback.is_cue_playing
+            )
+            if reply_still_playing:
                 return
             if self.state is not DeviceState.IDLE:
                 self._transition(DeviceState.IDLE)
