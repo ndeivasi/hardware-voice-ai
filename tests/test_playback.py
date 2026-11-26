@@ -665,6 +665,44 @@ def test_mute_during_live_flush_drops_the_tail(monkeypatch) -> None:
     playback.close()
 
 
+@pytest.mark.usefixtures("hold_thread_switch")
+def test_play_returns_only_after_the_playback_thread_has_run(monkeypatch) -> None:
+    """A caller must not observe a sound the playback thread has not claimed.
+
+    Without this, a tight loop on Python 3.13 keeps the wake cue "playing"
+    for the rest of the microphone buffer, and a reply's ``wait`` blocks in
+    ``flush`` because the samples were queued after the test stopped pumping
+    the callback.
+    """
+    speaker = NullSpeaker(_fmt())
+    playback = SpeakerPlayback(speaker)
+    cue = render_cue(Cue.WAKE, _fmt())
+    result = playback.play_cue(Cue.WAKE)
+    assert result.status is PlaybackStatus.COMPLETED
+    assert result.samples_played == len(cue)
+    assert playback.is_playing is False
+    assert playback.is_cue_playing is False
+    playback.close()
+
+    live, callback = _live_speaker(monkeypatch)
+    playback = SpeakerPlayback(live)
+    audio = np.full(640, 0.4, dtype=np.float32)
+    playback.play_reply(MemoryReplyAudio(audio, sample_rate_hz=16_000, channels=1))
+    assert playback.is_playing is True
+    assert playback.is_cue_playing is False
+    assert live.queued_samples == len(audio)
+    assert live.played_samples == 0
+    out = np.zeros((320, 1), dtype=np.float32)
+    callback(out, 320, None, None)
+    assert np.allclose(out[:, 0], audio[:320])
+    callback(out, 320, None, None)
+    assert np.allclose(out[:, 0], audio[320:])
+    finished = playback.wait()
+    assert finished.status is PlaybackStatus.COMPLETED
+    assert live.played_samples == len(audio)
+    playback.close()
+
+
 def test_live_flush_completes_after_the_callback_drains(monkeypatch) -> None:
     speaker, callback = _live_speaker(monkeypatch)
     playback = SpeakerPlayback(speaker)

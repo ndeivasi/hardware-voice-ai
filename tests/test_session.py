@@ -252,6 +252,7 @@ def test_wake_while_muted_is_ignored_and_later_wake_still_works() -> None:
     runtime.close()
 
 
+@pytest.mark.usefixtures("hold_thread_switch")
 def test_second_wake_while_capturing_is_not_accepted() -> None:
     template = default_template()
     word = render_pattern(template)
